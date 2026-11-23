@@ -7,7 +7,7 @@ images leaving the machine.
 | | |
 |---|---|
 | Model | Stable Diffusion 1.5 (pruned fp16 single-file `.safetensors`) |
-| Runtime | PyTorch **CPU** build, `float32`, attention slicing + VAE slicing |
+| Runtime | PyTorch **CPU** build, `float32`, VAE slicing, PyTorch SDPA attention |
 | Scheduler | `EulerAncestralDiscreteScheduler` — quality at 16–20 steps |
 | Resolution | hard-clamped to **≤ 768 px** so 8 GB RAM never crashes |
 | Backend | FastAPI + Uvicorn on `http://127.0.0.1:8000` |
@@ -47,21 +47,31 @@ Open **http://127.0.0.1:8000**
 2. **Negative prompt** — pre-filled with a sensible default (low quality, deformed hands,
    watermark…). Edit or clear it freely.
 3. **Aspect ratio** — `512×512 Square`, `512×768 Portrait`, `768×512 Landscape`.
-4. **Steps** — slider `12…25`, default **18** (16–20 is the sweet spot for Euler Ancestral).
-5. **CFG scale** — slider `1.0…12.0`, default **7.0**.
+4. **Steps** — slider `12…25`, default **12** (fastest). Raise toward 20 for extra detail at
+   roughly proportional cost.
+5. **CFG scale** — slider `1.0…12.0`, default **7.0**. **Set it to `1.0` to almost halve the
+   render time** — the model then skips the second (negative-prompt) pass — at the cost of how
+   strictly the prompt is followed.
 6. **Seed** — `−1` = random every time; click the 🎲 button for a random number, or paste a
    previous seed to reproduce an image exactly.
 7. Press **Generate Image** (or `Ctrl + Enter`).
 
-While it runs you get a **live elapsed timer** and a phase label. On CPU expect roughly:
+While it runs you get a **live elapsed timer** and a phase label. Measured on a 4-core
+i5-3470 with ~1.5 GB RAM free (page file on an SSD):
 
 | Size | Steps | Typical time |
 |------|-------|--------------|
-| 512×512 | 18 | ~1–2 min |
-| 768×512 / 512×768 | 18 | ~2–4 min |
-| 768×768 | 18 | ~3–6 min |
+| 512×512 | 12 | ~7–8 min |
+| 512×512 | 20 | ~12 min |
+| 768×512 / 512×768 | 12 | ~12–16 min |
+| 768×768 | 12 | ~18–25 min |
 
-*(first generation is slower: the checkpoint is also being read from disk into RAM.)*
+**This machine is memory-bound, not just CPU-bound**: the `float32` model wants ~4.3 GB and
+only ~1.5 GB is free, so Windows streams weights back from the page file on every step.
+Freeing RAM (close tabs/launchers) is the single biggest speed-up available, followed by
+CFG `1.0`, then fewer steps.
+
+*(First generation is slower still: the checkpoint is read from disk into RAM, ~1.5 min.)*
 
 When it finishes you get:
 
@@ -95,6 +105,14 @@ Tune the thresholds with environment variables if you like:
 set MIN_FREE_RAM_GB=1.0
 set RAM_WARN_GB=3.5
 set TORCH_NUM_THREADS=6
+```
+
+**Attention slicing** is deliberately **off by default**: PyTorch ≥ 2.0 already runs memory-efficient
+SDPA attention, and slicing on top of it makes the CPU walk attention one row at a time — measured
+**51 s/step instead of ~8**. Only turn it on if you genuinely run out of RAM:
+
+```bat
+set ATTENTION_SLICING=1     # slower but leaner; default 0 (off)
 ```
 
 ---
@@ -145,7 +163,7 @@ If you already have a valid checkpoint in `models/`, setup **skips** the 2 GB do
   "prompt": "a cinematic portrait of ...",
   "negative_prompt": "low quality, ...",
   "width": 512, "height": 768,
-  "steps": 18, "guidance_scale": 7.0,
+  "steps": 12, "guidance_scale": 7.0,
   "seed": -1,
   "model_name": "Realistic_Vision_V6.0_NV_B1_fp16.safetensors"
 }
@@ -168,11 +186,15 @@ local-image-studio/
 │   └── requirements.txt    # CPU-only dependency pins
 ├── frontend/
 │   └── index.html          # the whole studio UI (single file)
-├── models/                 # .safetensors checkpoints (auto-created)
-├── outputs/                # auto-saved timestamped PNGs
+├── models/                 # .safetensors checkpoints (auto-created, never committed)
+├── outputs/                # auto-saved timestamped PNGs (never committed)
 ├── venv/                   # virtual environment (auto-created)
 ├── start.bat               # Windows one-click launch
-└── start.sh                # Linux / macOS launch
+├── start.sh                # Linux / macOS launch
+├── tunnel.bat              # public https:// tunnel for the backend (Vercel/phone use)
+├── vercel.json             # static-host config: serves frontend/ only
+├── .gitignore              # keeps venv/ 2 GB model/outputs out of git
+└── .vercelignore           # keeps Vercel's upload limited to frontend/
 ```
 
 ### Manual install (instead of `start.bat`)
@@ -186,17 +208,71 @@ venv\Scripts\python -m uvicorn main:app --app-dir backend --host 127.0.0.1 --por
 
 ---
 
-## 7. Troubleshooting
+## 7. Use it from your phone (host the UI on Vercel)
+
+The same `frontend/index.html` works two ways:
+
+* **On your PC** — opened via `start.bat`, the page talks to the server it was served from
+  (no configuration).
+* **Hosted (Vercel)** — the page needs the address of *your PC's* backend, which you expose
+  with a free public tunnel. Images are still generated on your own machine; nothing goes to a
+  third-party AI service.
+
+> Vercel is **static hosting only**: it cannot run PyTorch or hold your 2 GB model. That's why
+> `vercel.json` points at `frontend/` and the backend stays on your PC.
+
+### Step 1 — Vercel
+
+1. Push this repo to GitHub (already done for this project).
+2. Go to **vercel.com → Add New → Project → Import** your repository.
+3. Keep the defaults — `vercel.json` already sets the output directory to `frontend`.
+4. Deploy. You get an address like `https://image-xxxx.vercel.app`.
+
+### Step 2 — expose your PC
+
+1. Run **`start.bat`** and leave it open (backend on `127.0.0.1:8000`).
+2. Run **`tunnel.bat`** in a second window. It downloads cloudflared once (~40 MB), then
+   prints a public address:
+
+   ```
+   https://xxxx-xxxx.trycloudflare.com
+   ```
+
+3. Leave that window open — closing it stops the tunnel. The address changes each run.
+
+### Step 3 — connect on any device
+
+1. Open your Vercel URL on PC **or phone**.
+2. Click the **`local`** button in the top bar → paste the `https://….trycloudflare.com`
+   address → **Connect**.
+3. Status turns green (*Server online*), the model list and gallery load, and Generate works.
+   The choice is remembered in that browser (`localStorage`), so you only do this once per
+   device.
+
+Shortcut: you can also open `https://your-app.vercel.app/?api=https://xxxx.trycloudflare.com`
+to connect without clicking through the modal.
+
+**Requirements:** `start.bat` **and** `tunnel.bat` must stay running on your PC, and the PC
+must stay awake. Tunneling is a plain HTTPS proxy — your prompts and images travel only
+between your device and your own machine.
+
+---
+
+## 8. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | *"No model found in models/"* | run `python backend/setup_model.py`, or drop a `.safetensors` into `models/` |
 | *"Only X GB of RAM is free…" (503)* | close other apps; the guard prevents a crash |
-| Very slow generation | close apps, use 512×512 and 12–16 steps; set `TORCH_NUM_THREADS` to your physical core count |
+| Very slow generation | close apps, use 512×512 and 12–16 steps; set `CFG 1.0`; set `TORCH_NUM_THREADS` to your physical core count |
 | Port already in use | `set PORT=8001` before `start.bat`, or stop the other process |
 | Download interrupted | `python backend/setup_model.py` resumes/ retries automatically |
 | Want to re-download the model | delete the file in `models\` then run `setup_model.py --force` |
 | Need more page file | System → Advanced → Performance → Virtual memory (the app never relies on it, but it helps on 8 GB) |
+| Hosted page says **Offline** / modal about a backend | expected on Vercel until you connect: run `start.bat` + `tunnel.bat` on the PC and paste the tunnel URL via the **local** button |
+| *"did not answer with JSON"* / tunnel errors | `tunnel.bat` window was closed or the PC slept — rerun it and reconnect with the **new** address |
+| `409 Conflict` on Generate | one generation is already running — wait for it (a second one would double peak RAM) |
+| Images 404 on the hosted page | the stored tunnel address is stale — reconnect via the **local** button with the current `trycloudflare.com` URL |
 
 **Requirements:** Python 3.10–3.14 (64-bit), ~5 GB free disk for deps + model, internet on
 first run only.

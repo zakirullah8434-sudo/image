@@ -455,6 +455,13 @@ async function api(path, options) {
     err.status = res.status;
     throw err;
   }
+  // A static host (Vercel) answers /api/* with index.html when no backend is
+  // configured: HTTP 200 but HTML. Say so instead of failing later on.
+  if (data === null || typeof data !== "object") {
+    throw new Error(apiBase()
+      ? "The backend at " + apiBase() + " did not answer with JSON - check that tunnel.bat is running."
+      : "No backend answered at this address. Run start.bat, then reload.");
+  }
   return data;
 }
 
@@ -792,6 +799,8 @@ $("copySeedBtn").addEventListener("click", async () => {
 $("refreshModels").addEventListener("click", () => { loadModels(); toast("Rescanned models/", "info"); });
 
 /* ══════════════════ BACKEND CONNECTION MODAL ══════════════════ */
+let backendPromptShown = false;   // auto-open the modal at most once per load
+
 function setBackendLabel() {
   $("backendLabel").textContent = apiBase() ? "remote" : "local";
   $("backendLabel").className = apiBase() ? "text-brand-300" : "";
@@ -848,12 +857,13 @@ async function pingHealth() {
     $("statusDot").className = "h-1.5 w-1.5 rounded-full bg-rose-400";
     $("statusPill").className = "flex items-center gap-2 rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1.5 text-rose-300";
     $("statusText").textContent = "Offline";
-    // Hosted with no backend configured yet -> tell the user what to do.
-    if (!isLocalHost() && !apiBase() && $("backendModal").classList.contains("hidden")) {
-      openBackendModal(
-        "This copy is hosted (Vercel), so it needs your PC. On your PC run " +
-        "start.bat, then tunnel.bat, and paste the https:// address it prints here."
-      );
+    // Nothing configured yet -> explain what to do, once per page load.
+    if (!apiBase() && !backendPromptShown) {
+      backendPromptShown = true;
+      openBackendModal(isLocalHost()
+        ? "No backend answered on this page. Run start.bat in the project folder, then reload."
+        : "This copy is hosted (Vercel), so it needs your PC. On your PC run start.bat, " +
+          "then tunnel.bat, and paste the https:// address it prints here.");
     }
   }
 }
