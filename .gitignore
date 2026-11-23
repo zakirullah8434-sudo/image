@@ -1,0 +1,27 @@
+# --- Python / virtualenv -------------------------------------------------
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Model weights (2 GB - far over GitHub's 100 MB limit) ---------------
+# Drop any SD 1.5 .safetensors here at runtime; setup_model.py also
+# auto-downloads one. Never commit checkpoints.
+models/*
+!models/README.md
+
+# --- Generated images ----------------------------------------------------
+outputs/*
+!outputs/.gitkeep
+
+# --- Tooling downloaded on demand ---------------------------------------
+tools/
+
+# --- OS / editor noise ---------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/

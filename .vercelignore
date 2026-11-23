@@ -1,0 +1,14 @@
+# Vercel only needs the static site in frontend/ - keep the upload tiny.
+venv/
+.venv/
+models/
+outputs/
+tools/
+__pycache__/
+*.pyc
+.git/
+*.md
+backend/
+start.bat
+start.sh
+tunnel.bat

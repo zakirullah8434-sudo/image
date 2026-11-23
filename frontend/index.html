@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Local Image Studio — CPU AI Image Generation</title>
+<meta name="description" content="Local, private, CPU-only Stable Diffusion 1.5 image generation studio tuned for 8 GB RAM." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink:   { 950:'#05070c', 900:'#080b12', 850:'#0b0f17', 800:'#0f141d', 700:'#161d2a', 600:'#1f2837' },
+          brand: { 300:'#c4b5fd', 400:'#a78bfa', 500:'#8b5cf6', 600:'#7c3aed', 700:'#6d28d9' },
+          cyanx: { 400:'#22d3ee', 500:'#06b6d4' }
+        },
+        fontFamily: { sans: ['Inter','system-ui','-apple-system','Segoe UI','sans-serif'] }
+      }
+    }
+  }
+</script>
+<style>
+  html, body { background:#05070c; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-track { background:#0b0f17; }
+  ::-webkit-scrollbar-thumb { background:#1f2837; border-radius:99px; border:2px solid #0b0f17; }
+  ::-webkit-scrollbar-thumb:hover { background:#2b3648; }
+
+  /* --- sliders --------------------------------------------------------- */
+  input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:6px; border-radius:99px;
+    background:linear-gradient(90deg,#8b5cf6 var(--pct,50%),#1f2837 var(--pct,50%)); outline:none; cursor:pointer; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%;
+    background:#fff; border:3px solid #8b5cf6; box-shadow:0 0 0 4px rgba(139,92,246,.18); transition:transform .12s; }
+  input[type=range]::-webkit-slider-thumb:hover { transform:scale(1.12); }
+  input[type=range]::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:#fff; border:3px solid #8b5cf6; }
+
+  /* --- animations ------------------------------------------------------ */
+  @keyframes floatUp { from { opacity:0; transform:translateY(14px);} to { opacity:1; transform:none;} }
+  .fade-in { animation:floatUp .35s cubic-bezier(.22,1,.36,1) both; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .spin { animation:spin 1s linear infinite; }
+  @keyframes pulseGlow { 0%,100% { box-shadow:0 0 0 0 rgba(139,92,246,.45);} 50% { box-shadow:0 0 0 14px rgba(139,92,246,0);} }
+  .glow { animation:pulseGlow 1.8s ease-out infinite; }
+  @keyframes shimmer { 0% { background-position:-600px 0; } 100% { background-position:600px 0; } }
+  .shimmer { background:linear-gradient(90deg,#0f141d 0%,#1a2233 50%,#0f141d 100%);
+    background-size:600px 100%; animation:shimmer 1.4s linear infinite; }
+
+  .chip { transition:all .15s ease; }
+  .chip:hover { transform:translateY(-1px); }
+  textarea { resize:vertical; }
+  .glass { backdrop-filter:blur(12px); }
+</style>
+</head>
+
+<body class="bg-ink-950 text-slate-200 font-sans min-h-screen antialiased selection:bg-brand-500/40">
+
+<!-- ══════════════════════════ HEADER ══════════════════════════ -->
+<header class="sticky top-0 z-40 border-b border-white/5 bg-ink-950/85 glass">
+  <div class="mx-auto flex max-w-[1600px] items-center gap-4 px-5 py-3">
+    <div class="flex items-center gap-3">
+      <div class="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-cyanx-500 shadow-lg shadow-brand-500/25">
+        <svg viewBox="0 0 24 24" class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>
+          <circle cx="12" cy="12" r="3.2" fill="currentColor" stroke="none"/>
+        </svg>
+      </div>
+      <div class="leading-tight">
+        <h1 class="text-[15px] font-bold tracking-tight text-white">Local Image Studio</h1>
+        <p class="text-[11px] text-slate-500">Stable Diffusion 1.5 · CPU only · private &amp; offline</p>
+      </div>
+    </div>
+
+    <div class="ml-auto flex items-center gap-3 text-[11px]">
+      <div id="ramPill" class="hidden items-center gap-2 rounded-full border border-white/10 bg-ink-850 px-3 py-1.5 text-slate-400 sm:flex">
+        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M8 10v4M12 10v4M16 10v4"/></svg>
+        <span>Free RAM <b id="freeRam" class="font-semibold text-slate-200">—</b></span>
+        <span class="h-3 w-px bg-white/10"></span>
+        <span>App peak <b id="peakRam" class="font-semibold text-slate-200">—</b></span>
+      </div>
+
+      <button id="backendBtn" type="button"
+        class="flex items-center gap-1.5 rounded-full border border-white/10 bg-ink-850 px-3 py-1.5 text-slate-400 transition hover:border-brand-500/60 hover:text-slate-200"
+        title="Backend connection settings">
+        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/>
+          <path d="M7 7.5h.01M7 16.5h.01"/>
+        </svg>
+        <span id="backendLabel">local</span>
+      </button>
+
+      <div id="statusPill" class="flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-emerald-300">
+        <span id="statusDot" class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+        <span id="statusText">Connecting…</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════ BACKEND CONNECTION MODAL ══════════════ -->
+<div id="backendModal" class="hidden fixed inset-0 z-50 items-center justify-center bg-black/70 p-4">
+  <div class="w-full max-w-md rounded-2xl border border-white/10 bg-ink-900 p-5 shadow-2xl">
+    <h2 class="text-sm font-bold text-white">Backend connection</h2>
+    <p class="mt-1.5 text-[12px] leading-relaxed text-slate-400">
+      <b>On your PC</b> (opened via <code class="text-brand-300">start.bat</code>) leave this empty — the page talks to the server it was served from.
+      <b>On Vercel / mobile</b>, paste the public URL printed by <code class="text-brand-300">tunnel.bat</code>.
+    </p>
+    <input id="backendInput" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+      placeholder="https://xxxx-xxxx.trycloudflare.com"
+      class="mt-3 w-full rounded-xl border border-white/10 bg-ink-950 px-3 py-2.5 font-mono text-[13px] text-slate-200 outline-none placeholder:text-slate-600 focus:border-brand-500" />
+    <div class="mt-3 flex flex-wrap gap-2">
+      <button id="backendSave" type="button" class="flex-1 rounded-xl bg-brand-600 px-4 py-2.5 text-[13px] font-semibold text-white transition hover:bg-brand-500">Connect</button>
+      <button id="backendLocal" type="button" class="rounded-xl border border-white/10 px-4 py-2.5 text-[13px] text-slate-300 transition hover:bg-white/5">Use local</button>
+      <button id="backendClose" type="button" class="rounded-xl border border-white/10 px-4 py-2.5 text-[13px] text-slate-400 transition hover:bg-white/5">Close</button>
+    </div>
+    <p id="backendHint" class="mt-3 hidden rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[12px] leading-relaxed text-amber-200"></p>
+  </div>
+</div>
+
+<!-- ══════════════════════════ MAIN ══════════════════════════ -->
+<main class="mx-auto grid max-w-[1600px] gap-5 px-5 py-5 lg:grid-cols-[390px_minmax(0,1fr)]">
+
+  <!-- ─────────── LEFT: CONTROLS ─────────── -->
+  <section class="flex flex-col gap-4 rounded-2xl border border-white/5 bg-ink-900 p-4 lg:sticky lg:top-[76px] lg:max-h-[calc(100vh-96px)] lg:overflow-y-auto">
+
+    <!-- Model -->
+    <div>
+      <div class="mb-2 flex items-center justify-between">
+        <label class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Model checkpoint</label>
+        <button id="refreshModels" class="text-[11px] text-slate-500 transition hover:text-brand-400" title="Rescan models/">↻ rescan</button>
+      </div>
+      <div class="relative">
+        <select id="modelSelect"
+          class="w-full appearance-none rounded-xl border border-white/10 bg-ink-850 px-3.5 py-2.5 pr-9 text-sm text-slate-200 outline-none transition focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20">
+          <option value="">Loading models…</option>
+        </select>
+        <svg class="pointer-events-none absolute right-3 top-3 h-4 w-4 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+      <p id="modelHint" class="mt-1.5 hidden text-[11px] text-amber-400/90"></p>
+    </div>
+
+    <!-- Prompt -->
+    <div>
+      <div class="mb-2 flex items-center justify-between">
+        <label for="prompt" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Prompt</label>
+        <span id="promptCount" class="text-[10px] text-slate-600">0</span>
+      </div>
+      <textarea id="prompt" rows="4" maxlength="4000"
+        placeholder="A cinematic portrait of a woman standing in neon-lit rain, looking at camera…"
+        class="w-full rounded-xl border border-white/10 bg-ink-850 px-3.5 py-3 text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 outline-none transition focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20"></textarea>
+
+      <!-- Preset chips -->
+      <div id="presetChips" class="mt-2.5 flex flex-wrap gap-1.5">
+        <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
+                data-suffix="photorealistic, ultra detailed skin texture, 85mm lens, natural lighting">Photorealistic</button>
+        <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
+                data-suffix="portrait, sharp focus on face, shallow depth of field, bokeh background">Portrait</button>
+        <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
+                data-suffix="cinematic lighting, dramatic shadows, film still, color graded">Cinematic</button>
+        <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
+                data-suffix="anime style, vibrant colors, clean line art">Anime</button>
+        <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
+                data-suffix="epic fantasy art, intricate details, magical atmosphere, concept art">Fantasy</button>
+        <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
+                data-suffix="sci-fi, futuristic, neon lights, cyberpunk, highly detailed">Sci-Fi</button>
+        <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
+                data-suffix="product photography, studio lighting, commercial shot">Product</button>
+      </div>
+    </div>
+
+    <!-- Negative prompt -->
+    <div>
+      <div class="mb-2 flex items-center justify-between">
+        <label for="negative" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Negative prompt</label>
+        <button id="clearNegative" class="text-[11px] text-slate-600 transition hover:text-slate-400">clear</button>
+      </div>
+      <textarea id="negative" rows="3" maxlength="4000"
+        class="w-full rounded-xl border border-white/10 bg-ink-850 px-3.5 py-3 text-sm leading-relaxed text-slate-300 placeholder:text-slate-600 outline-none transition focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20">low quality, worst quality, blurry, jpeg artifacts, watermark, text, logo, signature, deformed, bad anatomy, malformed hands, extra fingers, mutated hands, cross-eyed, poorly drawn face</textarea>
+    </div>
+
+    <div class="h-px bg-white/5"></div>
+
+    <!-- Aspect ratio -->
+    <div>
+      <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-slate-500">Aspect ratio</label>
+      <div id="ratioGroup" class="grid grid-cols-3 gap-2">
+        <button data-w="512" data-h="512" class="ratio rounded-xl border border-brand-500/60 bg-brand-500/15 px-2 py-2.5 text-center transition hover:border-brand-500/80">
+          <span class="block text-[13px] font-semibold text-white">512×512</span><span class="block text-[10px] text-slate-400">Square</span>
+        </button>
+        <button data-w="512" data-h="768" class="ratio rounded-xl border border-white/10 bg-ink-850 px-2 py-2.5 text-center transition hover:border-brand-500/50">
+          <span class="block text-[13px] font-semibold text-white">512×768</span><span class="block text-[10px] text-slate-400">Portrait</span>
+        </button>
+        <button data-w="768" data-h="512" class="ratio rounded-xl border border-white/10 bg-ink-850 px-2 py-2.5 text-center transition hover:border-brand-500/50">
+          <span class="block text-[13px] font-semibold text-white">768×512</span><span class="block text-[10px] text-slate-400">Landscape</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Steps -->
+    <div>
+      <div class="mb-2 flex items-center justify-between">
+        <label for="steps" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Steps</label>
+        <span id="stepsVal" class="rounded-md bg-ink-850 px-2 py-0.5 font-mono text-[12px] font-semibold text-brand-300">12</span>
+      </div>
+      <input id="steps" type="range" min="12" max="25" step="1" value="12" />
+      <div class="mt-1 flex justify-between text-[10px] text-slate-600"><span>12 fast</span><span>25 detailed</span></div>
+    </div>
+
+    <!-- CFG -->
+    <div>
+      <div class="mb-2 flex items-center justify-between">
+        <label for="cfg" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">CFG scale</label>
+        <span id="cfgVal" class="rounded-md bg-ink-850 px-2 py-0.5 font-mono text-[12px] font-semibold text-brand-300">7.0</span>
+      </div>
+      <input id="cfg" type="range" min="1" max="12" step="0.5" value="7" />
+      <div class="mt-1 flex justify-between text-[10px] text-slate-600"><span>1.0 loose</span><span>12.0 strict</span></div>
+    </div>
+
+    <!-- Seed -->
+    <div>
+      <div class="mb-2 flex items-center justify-between">
+        <label for="seed" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Seed</label>
+        <span class="text-[10px] text-slate-600">−1 = random</span>
+      </div>
+      <div class="flex gap-2">
+        <input id="seed" type="number" value="-1" min="-1" max="4294967295"
+          class="w-full rounded-xl border border-white/10 bg-ink-850 px-3.5 py-2.5 font-mono text-sm text-slate-200 outline-none transition focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20" />
+        <button id="randomSeed" title="Random seed"
+          class="grid w-11 shrink-0 place-items-center rounded-xl border border-white/10 bg-ink-850 text-slate-400 transition hover:border-brand-500/50 hover:text-brand-300">
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.3" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.3" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.3" fill="currentColor"/><circle cx="8.5" cy="15.5" r="1.3" fill="currentColor"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Generate -->
+    <button id="generateBtn"
+      class="group relative mt-1 w-full overflow-hidden rounded-xl bg-gradient-to-r from-brand-600 via-brand-500 to-cyanx-500 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-brand-500/25 transition hover:shadow-brand-500/40 disabled:cursor-not-allowed disabled:opacity-55">
+      <span id="generateLabel" class="relative z-10 flex items-center justify-center gap-2">
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 3v4M3 5h4M6 17v4m-2-2h4"/><path d="M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5z" fill="currentColor" stroke="none"/></svg>
+        Generate Image
+      </span>
+    </button>
+    <p class="-mt-2 text-center text-[10.5px] text-slate-600">Ctrl + Enter to generate · 1–3 min on CPU at 768px</p>
+
+    <!-- live status -->
+    <div id="liveStatus" class="hidden rounded-xl border border-white/5 bg-ink-850 p-3">
+      <div class="flex items-center gap-2.5">
+        <svg class="spin h-4 w-4 text-brand-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.2-8.6" stroke-linecap="round"/></svg>
+        <span class="text-[12.5px] font-medium text-slate-300">Generating on CPU…</span>
+        <span id="timer" class="ml-auto font-mono text-[12.5px] font-bold text-brand-300">0.0s</span>
+      </div>
+      <div class="mt-2.5 h-1.5 overflow-hidden rounded-full bg-ink-700">
+        <div id="progressBar" class="h-full w-1/3 rounded-full bg-gradient-to-r from-brand-500 to-cyanx-400" style="animation:shimmer 1.4s linear infinite; background-size:200% 100%;"></div>
+      </div>
+      <p id="loadingNote" class="mt-2 text-[11px] leading-relaxed text-slate-500">Building latents with Euler Ancestral · attention slicing on</p>
+    </div>
+  </section>
+
+  <!-- ─────────── RIGHT: WORKSPACE ─────────── -->
+  <section class="flex min-w-0 flex-col gap-4">
+
+    <!-- Result card -->
+    <div class="rounded-2xl border border-white/5 bg-ink-900 p-4">
+      <div class="mb-3 flex flex-wrap items-center gap-3">
+        <h2 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Result</h2>
+        <span id="resultBadge" class="hidden rounded-full border border-brand-500/30 bg-brand-500/10 px-2.5 py-0.5 text-[10.5px] font-medium text-brand-300"></span>
+        <div class="ml-auto flex gap-2">
+          <button id="downloadBtn" disabled class="hidden items-center gap-1.5 rounded-lg border border-white/10 bg-ink-850 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-emerald-400/50 hover:text-emerald-300 disabled:opacity-40">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            Download PNG
+          </button>
+          <button id="copySeedBtn" disabled class="hidden items-center gap-1.5 rounded-lg border border-white/10 bg-ink-850 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-brand-400/50 hover:text-brand-300 disabled:opacity-40">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+            Copy Seed
+          </button>
+        </div>
+      </div>
+
+      <!-- Empty state -->
+      <div id="emptyState" class="grid min-h-[420px] place-items-center rounded-xl border-2 border-dashed border-white/10 bg-ink-950/40 px-6 text-center">
+        <div class="max-w-md">
+          <div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-brand-500/25 to-cyanx-500/25 ring-1 ring-brand-500/30">
+            <svg viewBox="0 0 24 24" class="h-7 w-7 text-brand-300" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m4 17 4.5-4.5a2 2 0 0 1 2.8 0L16 17"/><path d="M14.5 14.5 16 13a2 2 0 0 1 2.8 0L21 15"/></svg>
+          </div>
+          <h3 class="text-base font-semibold text-white">Your canvas is empty</h3>
+          <p class="mt-1.5 text-[13px] leading-relaxed text-slate-500">
+            Write a prompt on the left and hit <b class="text-slate-400">Generate Image</b>.
+            Everything runs locally on your CPU — nothing ever leaves this PC.
+          </p>
+          <div class="mt-5 flex flex-wrap justify-center gap-2 text-[11px]">
+            <span class="rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-slate-500">🔒 100% offline</span>
+            <span class="rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-slate-500">🧠 ≤ 5.5 GB RAM</span>
+            <span class="rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-slate-500">⚙️ 16–20 steps</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Loading state -->
+      <div id="loadingState" class="hidden min-h-[420px] rounded-xl border border-white/5 bg-ink-950/40 p-4">
+        <div class="mb-3 flex items-baseline gap-3">
+          <span class="text-sm font-semibold text-white">Rendering…</span>
+          <span id="bigTimer" class="font-mono text-sm font-bold text-brand-300">0.0s</span>
+          <span id="bigPhase" class="ml-auto text-[11.5px] text-slate-500">loading model (first run only)</span>
+        </div>
+        <div class="shimmer grid h-[360px] w-full place-items-center rounded-lg">
+          <div class="text-center">
+            <svg class="spin mx-auto h-8 w-8 text-brand-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.2-8.6" stroke-linecap="round"/></svg>
+            <p class="mt-3 text-[12px] text-slate-500">CPU denoising — stay on this page</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Result state -->
+      <div id="resultState" class="hidden">
+        <div class="relative overflow-hidden rounded-xl border border-white/10 bg-ink-950">
+          <img id="resultImg" alt="Generated image" class="mx-auto max-h-[68vh] w-auto max-w-full object-contain" />
+        </div>
+
+        <div id="metaRow" class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          <div class="rounded-lg border border-white/5 bg-ink-850 px-3 py-2">
+            <div class="text-[9.5px] uppercase tracking-wider text-slate-600">Time</div>
+            <div id="metaTime" class="font-mono text-[13px] font-semibold text-slate-200">—</div>
+          </div>
+          <div class="rounded-lg border border-white/5 bg-ink-850 px-3 py-2">
+            <div class="text-[9.5px] uppercase tracking-wider text-slate-600">Seed</div>
+            <div id="metaSeed" class="truncate font-mono text-[13px] font-semibold text-slate-200">—</div>
+          </div>
+          <div class="rounded-lg border border-white/5 bg-ink-850 px-3 py-2">
+            <div class="text-[9.5px] uppercase tracking-wider text-slate-600">Size</div>
+            <div id="metaSize" class="font-mono text-[13px] font-semibold text-slate-200">—</div>
+          </div>
+          <div class="rounded-lg border border-white/5 bg-ink-850 px-3 py-2">
+            <div class="text-[9.5px] uppercase tracking-wider text-slate-600">Steps / CFG</div>
+            <div id="metaSteps" class="font-mono text-[13px] font-semibold text-slate-200">—</div>
+          </div>
+          <div class="rounded-lg border border-white/5 bg-ink-850 px-3 py-2">
+            <div class="text-[9.5px] uppercase tracking-wider text-slate-600">Peak RAM</div>
+            <div id="metaRam" class="font-mono text-[13px] font-semibold text-slate-200">—</div>
+          </div>
+          <div class="rounded-lg border border-white/5 bg-ink-850 px-3 py-2">
+            <div class="text-[9.5px] uppercase tracking-wider text-slate-600">Model</div>
+            <div id="metaModel" class="truncate text-[12px] font-semibold text-slate-200" title="">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gallery -->
+    <div class="rounded-2xl border border-white/5 bg-ink-900 p-4">
+      <div class="mb-3 flex items-center gap-3">
+        <h2 class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">History gallery</h2>
+        <span id="galleryCount" class="rounded-full bg-ink-850 px-2 py-0.5 text-[10.5px] text-slate-500">0</span>
+        <span class="ml-auto text-[10.5px] text-slate-600">saved automatically in <code class="text-slate-500">outputs/</code></span>
+      </div>
+
+      <div id="galleryEmpty" class="rounded-xl border border-dashed border-white/10 py-8 text-center text-[12.5px] text-slate-600">
+        No images yet — your generations will appear here as clickable thumbnails.
+      </div>
+
+      <div id="galleryStrip" class="hidden -mx-1 flex gap-2 overflow-x-auto px-1 pb-2"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="mx-auto max-w-[1600px] px-5 pb-8 pt-2 text-center text-[11px] text-slate-700">
+  Local Image Studio · runs on <span id="footTorch" class="text-slate-600">PyTorch CPU</span> · images stay on this machine
+</footer>
+
+<!-- Toast -->
+<div id="toast" class="pointer-events-none fixed bottom-5 left-1/2 z-50 hidden w-[min(520px,92vw)] -translate-x-1/2">
+  <div id="toastCard" class="pointer-events-auto rounded-xl border px-4 py-3 text-[13px] shadow-2xl glass"></div>
+</div>
+
+<script>
+/* ═══════════════════════════════ STATE ═══════════════════════════════ */
+const $ = (id) => document.getElementById(id);
+let busy = false;
+let timerHandle = null;
+let startedAt = 0;
+let currentSeed = null;
+let currentUrl = null;
+let currentFilename = null;
+let modelLoadedOnce = false;
+
+const DEFAULT_NEGATIVE = $("negative").value;
+
+/* ═══════════════════════════════ TOAST ═══════════════════════════════ */
+let toastTimer = null;
+function toast(message, kind = "info") {
+  const card = $("toastCard");
+  const styles = {
+    error:   "border-rose-400/30 bg-rose-950/90 text-rose-200",
+    success: "border-emerald-400/30 bg-emerald-950/90 text-emerald-200",
+    info:    "border-white/10 bg-ink-800/95 text-slate-200",
+    warn:    "border-amber-400/30 bg-amber-950/90 text-amber-200",
+  };
+  card.className = "pointer-events-auto rounded-xl border px-4 py-3 text-[13px] shadow-2xl glass " + (styles[kind] || styles.info);
+  card.textContent = message;
+  $("toast").classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.add("hidden"), kind === "error" ? 7000 : 3500);
+}
+
+/* ═══════════════════════════════ API ═══════════════════════════════ */
+/* The UI can run two ways:
+ *   1. served by the local FastAPI server  -> apiBase() === ""  (same origin)
+ *   2. hosted on Vercel                     -> apiBase() is the tunnel URL of
+ *      the PC running the backend, stored in localStorage / ?api= query param.
+ * Everything (API calls and /outputs/*.png) goes through apiUrl()/absUrl().    */
+const LS_BACKEND = "lis_backend_url";
+
+function apiBase() {
+  try {
+    const q = new URLSearchParams(location.search).get("api");
+    if (q) localStorage.setItem(LS_BACKEND, q.replace(/\/+$/, ""));
+  } catch (e) { /* ignore bad query strings */ }
+  try {
+    return (localStorage.getItem(LS_BACKEND) || "").replace(/\/+$/, "");
+  } catch (e) {
+    return "";
+  }
+}
+
+function apiUrl(path) { return apiBase() + path; }
+
+/* Prefix server-returned relative URLs (/outputs/x.png) when remote. */
+function absUrl(url) {
+  if (!url) return url;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
+  return apiBase() + url;
+}
+
+function isLocalHost() {
+  const h = location.hostname;
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "";
+}
+
+async function api(path, options) {
+  let res;
+  try {
+    res = await fetch(apiUrl(path), options);
+  } catch (e) {
+    throw new Error(apiBase()
+      ? "Cannot reach the backend at " + apiBase() + ". Check that tunnel.bat is still running on your PC."
+      : "Cannot reach the local server. Close this window and run start.bat again.");
+  }
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* non-JSON */ }
+  if (!res.ok) {
+    const detail = data && data.detail ? data.detail : ("Request failed (HTTP " + res.status + ")");
+    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+/* ═══════════════════════════════ MODELS ═══════════════════════════════ */
+async function loadModels() {
+  try {
+    const models = await api("/api/models");
+    const select = $("modelSelect");
+    const previous = select.value;
+    select.innerHTML = "";
+
+    if (!models.length) {
+      select.innerHTML = '<option value="">No model found</option>';
+      const hint = $("modelHint");
+      hint.textContent = "Run  python backend/setup_model.py  to download a ~2 GB model, or drop any SD1.5 .safetensors into models/.";
+      hint.classList.remove("hidden");
+      return;
+    }
+    $("modelHint").classList.add("hidden");
+
+    models.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.name;
+      opt.textContent = m.name.replace(/\.safetensors$/i, "") + (m.valid ? "" : "  ⚠ invalid");
+      if (!m.valid) opt.disabled = true;
+      select.appendChild(opt);
+    });
+
+    const preferred = models.find((m) => m.name === previous && m.valid)
+      || models.find((m) => m.valid)
+      || models[0];
+    select.value = preferred.name;
+  } catch (e) {
+    $("modelSelect").innerHTML = '<option value="">unavailable</option>';
+    toast(e.message, "error");
+  }
+}
+
+/* ═══════════════════════════════ GALLERY ═══════════════════════════════ */
+function seedFromFilename(name) {
+  const m = /seed(-?\d+)/.exec(name || "");
+  return m ? parseInt(m[1], 10) : null;
+}
+
+async function loadGallery() {
+  try {
+    const images = await api("/api/gallery");
+    const strip = $("galleryStrip");
+    $("galleryCount").textContent = images.length;
+
+    if (!images.length) {
+      strip.classList.add("hidden");
+      strip.innerHTML = "";
+      $("galleryEmpty").classList.remove("hidden");
+      return;
+    }
+    $("galleryEmpty").classList.add("hidden");
+    strip.classList.remove("hidden");
+    strip.innerHTML = "";
+
+    images.forEach((img) => {
+      const btn = document.createElement("button");
+      btn.className = "group relative h-[86px] w-[86px] shrink-0 overflow-hidden rounded-lg border border-white/10 ring-0 transition hover:border-brand-500/70 hover:ring-2 hover:ring-brand-500/40";
+      btn.title = img.name;
+      const im = document.createElement("img");
+      im.src = absUrl(img.url);
+      im.loading = "lazy";
+      im.alt = img.name;
+      im.className = "h-full w-full object-cover transition group-hover:scale-105";
+      const time = document.createElement("span");
+      time.className = "absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-1.5 pb-1 pt-3 text-left text-[9px] text-white/85";
+      time.textContent = (img.created || "").replace("T", " ").slice(5, 16);
+      btn.appendChild(im);
+      btn.appendChild(time);
+      btn.addEventListener("click", () => showGalleryImage(img, btn));
+      strip.appendChild(btn);
+    });
+  } catch (e) {
+    console.warn("gallery:", e.message);
+  }
+}
+
+function showGalleryImage(img, btn) {
+  document.querySelectorAll("#galleryStrip button").forEach((b) => b.classList.remove("border-brand-500", "ring-2", "ring-brand-500/50"));
+  if (btn) btn.classList.add("border-brand-500", "ring-2", "ring-brand-500/50");
+
+  $("emptyState").classList.add("hidden");
+  $("loadingState").classList.add("hidden");
+  $("resultState").classList.remove("hidden");
+
+  $("resultImg").src = absUrl(img.url);
+  $("resultImg").alt = img.name;
+
+  const seed = seedFromFilename(img.name);
+  const dims = /_(\d+)x(\d+)\.png$/.exec(img.name);
+  const badge = $("resultBadge");
+  badge.textContent = "from history";
+  badge.classList.remove("hidden");
+
+  $("metaTime").textContent = "saved";
+  $("metaSeed").textContent = seed === null ? "—" : seed;
+  $("metaSize").textContent = dims ? dims[1] + "×" + dims[2] : "—";
+  $("metaSteps").textContent = "—";
+  $("metaRam").textContent = "—";
+  $("metaModel").textContent = "—";
+
+  currentSeed = seed;
+  currentUrl = absUrl(img.url);
+  currentFilename = img.name;
+  $("downloadBtn").disabled = false;
+  $("downloadBtn").classList.remove("hidden");
+  $("downloadBtn").classList.add("flex");
+  $("copySeedBtn").disabled = seed === null;
+  $("copySeedBtn").classList.remove("hidden");
+  $("copySeedBtn").classList.add("flex");
+}
+
+/* ═══════════════════════════════ CONTROLS ═══════════════════════════════ */
+function paintRange(input) {
+  const min = parseFloat(input.min), max = parseFloat(input.max), val = parseFloat(input.value);
+  const pct = ((val - min) / (max - min)) * 100;
+  input.style.setProperty("--pct", pct + "%");
+}
+
+["steps", "cfg"].forEach((id) => {
+  const el = $(id);
+  const label = $(id === "steps" ? "stepsVal" : "cfgVal");
+  const update = () => {
+    paintRange(el);
+    label.textContent = id === "steps" ? el.value : parseFloat(el.value).toFixed(1);
+  };
+  el.addEventListener("input", update);
+  update();
+});
+
+$("prompt").addEventListener("input", () => { $("promptCount").textContent = $("prompt").value.length; });
+
+$("clearNegative").addEventListener("click", () => { $("negative").value = ""; });
+
+document.querySelectorAll("#presetChips .chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const ta = $("prompt");
+    const suffix = chip.dataset.suffix;
+    const active = chip.classList.toggle("active");
+    if (active) {
+      chip.classList.add("border-brand-500/70", "bg-brand-500/15", "text-brand-300");
+      chip.classList.remove("border-white/10", "bg-ink-850", "text-slate-400");
+      const base = ta.value.trim().replace(/,\s*$/, "");
+      ta.value = base ? base + ", " + suffix : suffix;
+    } else {
+      chip.classList.remove("border-brand-500/70", "bg-brand-500/15", "text-brand-300");
+      chip.classList.add("border-white/10", "bg-ink-850", "text-slate-400");
+      const esc = suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      ta.value = ta.value
+        .replace(new RegExp(",?\\s*" + esc), "")
+        .replace(/^\s*,\s*/, "")
+        .replace(/,\s*$/, "");
+    }
+    $("promptCount").textContent = ta.value.length;
+  });
+});
+
+document.querySelectorAll("#ratioGroup .ratio").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#ratioGroup .ratio").forEach((b) => {
+      b.className = "ratio rounded-xl border border-white/10 bg-ink-850 px-2 py-2.5 text-center transition hover:border-brand-500/50";
+    });
+    btn.className = "ratio rounded-xl border border-brand-500/60 bg-brand-500/15 px-2 py-2.5 text-center transition hover:border-brand-500/80";
+  });
+});
+
+$("randomSeed").addEventListener("click", () => {
+  $("seed").value = Math.floor(Math.random() * 4294967296);
+});
+
+/* ═══════════════════════════════ TIMER ═══════════════════════════════ */
+function fmt(sec) { return sec.toFixed(1) + "s"; }
+
+function startTimer() {
+  startedAt = Date.now();
+  const tick = () => {
+    const s = (Date.now() - startedAt) / 1000;
+    $("timer").textContent = fmt(s);
+    $("bigTimer").textContent = fmt(s);
+    if (!modelLoadedOnce && s < 45) {
+      $("bigPhase").textContent = "loading model into RAM (first run only)";
+    } else if (s < 8) {
+      $("bigPhase").textContent = "preparing latents &amp; scheduler";
+    } else {
+      $("bigPhase").textContent = "denoising on CPU · " + currentSteps() + " steps";
+    }
+    if (s > 45) {
+      $("loadingNote").textContent = "Still working — CPU generation is slow by nature. Larger sizes take longer.";
+    }
+  };
+  tick();
+  timerHandle = setInterval(tick, 100);
+}
+function stopTimer() { clearInterval(timerHandle); timerHandle = null; }
+function currentSteps() { return $("steps").value; }
+
+/* ═══════════════════════════════ GENERATE ═══════════════════════════════ */
+async function generate() {
+  if (busy) return;
+
+  const prompt = $("prompt").value.trim();
+  if (!prompt) { toast("Write a prompt first.", "warn"); $("prompt").focus(); return; }
+
+  const ratioBtn = document.querySelector("#ratioGroup .ratio.bg-brand-500\\/15, #ratioGroup .ratio.active")
+    || document.querySelector("#ratioGroup .ratio[class*='bg-brand-500']");
+  const width = ratioBtn ? parseInt(ratioBtn.dataset.w, 10) : 512;
+  const height = ratioBtn ? parseInt(ratioBtn.dataset.h, 10) : 512;
+
+  const payload = {
+    prompt: prompt,
+    negative_prompt: $("negative").value.trim(),
+    width: width,
+    height: height,
+    steps: parseInt($("steps").value, 10),
+    guidance_scale: parseFloat($("cfg").value),
+    seed: parseInt($("seed").value, 10),
+    model_name: $("modelSelect").value,
+  };
+
+  setBusy(true);
+  $("emptyState").classList.add("hidden");
+  $("resultState").classList.add("hidden");
+  $("loadingState").classList.remove("hidden");
+  $("loadingNote").textContent = "Building latents with Euler Ancestral · attention slicing on";
+  startTimer();
+
+  try {
+    const data = await api("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    modelLoadedOnce = true;
+    stopTimer();
+
+    $("resultImg").src = "data:" + data.mime + ";base64," + data.image_base64;
+    $("loadingState").classList.add("hidden");
+    $("resultState").classList.remove("hidden");
+
+    const badge = $("resultBadge");
+    badge.textContent = data.total_time_seconds + "s total · " + (data.model_load_seconds > 0 ? "first load " + data.model_load_seconds + "s · " : "") + "inference " + data.generation_time_seconds + "s";
+    badge.classList.remove("hidden");
+
+    $("metaTime").textContent = data.generation_time_seconds + "s";
+    $("metaSeed").textContent = data.seed;
+    $("metaSize").textContent = data.width + "×" + data.height;
+    $("metaSteps").textContent = data.steps + " / " + data.guidance_scale;
+    $("metaRam").textContent = data.peak_ram_gb + " GB";
+    $("metaModel").textContent = data.model_name.replace(/\.safetensors$/i, "");
+    $("metaModel").title = data.model_name;
+    $("peakRam").textContent = data.peak_ram_gb + " GB";
+
+    currentSeed = data.seed;
+    currentUrl = "data:" + data.mime + ";base64," + data.image_base64;
+    currentFilename = data.filename;
+
+    $("downloadBtn").disabled = false;
+    $("downloadBtn").classList.remove("hidden"); $("downloadBtn").classList.add("flex");
+    $("copySeedBtn").disabled = false;
+    $("copySeedBtn").classList.remove("hidden"); $("copySeedBtn").classList.add("flex");
+
+    $("liveStatus").classList.add("hidden");
+    const summary = "Generated in " + data.generation_time_seconds + "s · peak RAM " + data.peak_ram_gb + " GB";
+    if (data.peak_ram_gb > 5.5) {
+      toast(summary + " — above the 5.5 GB target. Try 512×512 or fewer steps.", "warn");
+    } else if (data.ram_warning) {
+      toast(summary + ". " + data.ram_warning, "warn");
+    } else {
+      toast(summary, "success");
+    }
+
+    loadGallery();
+    pingHealth();
+  } catch (e) {
+    stopTimer();
+    $("loadingState").classList.add("hidden");
+    if ($("resultImg").src) { $("resultState").classList.remove("hidden"); }
+    else { $("emptyState").classList.remove("hidden"); }
+    $("liveStatus").classList.add("hidden");
+    toast(e.message, e.status === 409 ? "warn" : "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
+function setBusy(value) {
+  busy = value;
+  $("generateBtn").disabled = value;
+  $("liveStatus").classList.toggle("hidden", !value);
+  $("generateLabel").innerHTML = value
+    ? '<svg class="spin h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-6.2-8.6" stroke-linecap="round"/></svg> Generating…'
+    : '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 3v4M3 5h4M6 17v4m-2-2h4"/><path d="M13 3l2.5 6.5L22 12l-6.5 2.5L13 21l-2.5-6.5L4 12l6.5-2.5z" fill="currentColor" stroke="none"/></svg> Generate Image';
+}
+
+$("generateBtn").addEventListener("click", generate);
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); }
+});
+
+/* ═══════════════════════════════ ACTIONS ═══════════════════════════════ */
+$("downloadBtn").addEventListener("click", () => {
+  if (!currentUrl) return;
+  const a = document.createElement("a");
+  a.href = currentUrl;
+  a.download = currentFilename || ("local-image-" + Date.now() + ".png");
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast("Saving " + a.download, "success");
+});
+
+$("copySeedBtn").addEventListener("click", async () => {
+  if (currentSeed === null) return;
+  const text = String(currentSeed);
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Seed " + text + " copied", "success");
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    toast("Seed " + text + " copied", "success");
+  }
+});
+
+$("refreshModels").addEventListener("click", () => { loadModels(); toast("Rescanned models/", "info"); });
+
+/* ══════════════════ BACKEND CONNECTION MODAL ══════════════════ */
+function setBackendLabel() {
+  $("backendLabel").textContent = apiBase() ? "remote" : "local";
+  $("backendLabel").className = apiBase() ? "text-brand-300" : "";
+}
+
+function openBackendModal(hintText) {
+  $("backendInput").value = apiBase();
+  const h = $("backendHint");
+  if (hintText) { h.textContent = hintText; h.classList.remove("hidden"); }
+  else { h.classList.add("hidden"); }
+  $("backendModal").classList.remove("hidden");
+  $("backendModal").classList.add("flex");
+  setTimeout(() => { try { $("backendInput").focus(); } catch (e) {} }, 50);
+}
+
+function closeBackendModal() {
+  $("backendModal").classList.add("hidden");
+  $("backendModal").classList.remove("flex");
+}
+
+function saveBackend(value) {
+  const v = (value || "").trim().replace(/\/+$/, "");
+  try {
+    if (v) localStorage.setItem(LS_BACKEND, v);
+    else localStorage.removeItem(LS_BACKEND);
+  } catch (e) { /* private mode */ }
+  // Reload without the ?api= param so the saved value wins from now on.
+  location.href = location.pathname;
+}
+
+$("backendBtn").addEventListener("click", () => openBackendModal(""));
+$("backendClose").addEventListener("click", closeBackendModal);
+$("backendModal").addEventListener("click", (e) => { if (e.target === $("backendModal")) closeBackendModal(); });
+$("backendLocal").addEventListener("click", () => saveBackend(""));
+$("backendSave").addEventListener("click", () => saveBackend($("backendInput").value));
+$("backendInput").addEventListener("keydown", (e) => { if (e.key === "Enter") saveBackend(e.target.value); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("backendModal").classList.contains("hidden")) closeBackendModal();
+});
+setBackendLabel();
+
+/* ═══════════════════════════════ HEALTH ═══════════════════════════════ */
+async function pingHealth() {
+  try {
+    const h = await api("/api/health");
+    $("statusDot").className = "h-1.5 w-1.5 rounded-full bg-emerald-400";
+    $("statusPill").className = "flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-emerald-300";
+    $("statusText").textContent = busy ? "Generating" : "Server online";
+    $("freeRam").textContent = h.free_ram_gb + " GB";
+    $("ramPill").classList.remove("hidden");
+    $("ramPill").classList.add("flex");
+    if (h.model_loaded) $("footTorch").textContent = "PyTorch " + h.torch + " · model loaded";
+  } catch (e) {
+    $("statusDot").className = "h-1.5 w-1.5 rounded-full bg-rose-400";
+    $("statusPill").className = "flex items-center gap-2 rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1.5 text-rose-300";
+    $("statusText").textContent = "Offline";
+    // Hosted with no backend configured yet -> tell the user what to do.
+    if (!isLocalHost() && !apiBase() && $("backendModal").classList.contains("hidden")) {
+      openBackendModal(
+        "This copy is hosted (Vercel), so it needs your PC. On your PC run " +
+        "start.bat, then tunnel.bat, and paste the https:// address it prints here."
+      );
+    }
+  }
+}
+
+/* ═══════════════════════════════ BOOT ═══════════════════════════════ */
+(async function boot() {
+  $("promptCount").textContent = $("prompt").value.length;
+  paintRange($("steps")); paintRange($("cfg"));
+  await Promise.all([loadModels(), loadGallery(), pingHealth()]);
+  setInterval(pingHealth, 10000);
+})();
+</script>
+</body>
+</html>
