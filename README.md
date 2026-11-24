@@ -226,7 +226,15 @@ The same `frontend/index.html` works two ways:
 1. Push this repo to GitHub (already done for this project).
 2. Go to **vercel.com → Add New → Project → Import** your repository.
 3. Keep the defaults — `vercel.json` already sets the output directory to `frontend`.
-4. Deploy. You get an address like `https://image-xxxx.vercel.app`.
+4. **Double-check the project settings** (this is what makes or breaks the deploy):
+   * **Settings → General → Root Directory** must be **empty** (repo root). If it says
+     `backend`, Vercel looks for `backend/frontend`, finds nothing and ships an **empty
+     site — every URL returns 404**.
+   * **Framework Preset** must be **Other** (not `FastAPI`/`Python` — there is nothing to
+     build here). `vercel.json` in the repo already pins `framework: null`.
+   * **Settings → Deployment Protection → Require Log In** must be **off**, otherwise every
+     visitor (including your phone) gets a Vercel login page instead of the app.
+5. Deploy. You get an address like `https://skyhoniximage.vercel.app`.
 
 ### Step 2 — expose your PC
 
@@ -273,6 +281,9 @@ between your device and your own machine.
 | *"did not answer with JSON"* / tunnel errors | `tunnel.bat` window was closed or the PC slept — rerun it and reconnect with the **new** address |
 | `409 Conflict` on Generate | one generation is already running — wait for it (a second one would double peak RAM) |
 | Images 404 on the hosted page | the stored tunnel address is stale — reconnect via the **local** button with the current `trycloudflare.com` URL |
+| Hosted URL returns **404 on every path** (incl. `/`) | Vercel **Root Directory** is set to something (e.g. `backend`) — clear it in Settings → General, and confirm Framework Preset = **Other**. Then redeploy |
+| Hosted URL shows a **Vercel "Log in" page** | Deployment Protection → **Require Log In** is on — turn it off (Settings → Deployment Protection) |
+| `skyhoniximage.vercel.app` 404 but the deployment looks Ready | the deployment predates the settings fix — push a commit (or click **Redeploy**) so Vercel rebuilds with the correct root |
 
 **Requirements:** Python 3.10–3.14 (64-bit), ~5 GB free disk for deps + model, internet on
 first run only.
