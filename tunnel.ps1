@@ -82,6 +82,15 @@ function Publish-TunnelUrl([string]$Url) {
     }
     # Commit ONLY this file, then push: GitHub -> Vercel rebuild (~1 min).
     # The page also reads the raw GitHub copy, which updates in seconds.
+    # Self-heal: a run that was killed mid-`git add` can leave .git/index
+    # corrupt ("bad signature 0x00000000"), breaking every later command.
+    # Detect that here and rebuild the index before staging anything.
+    git status --porcelain 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host " [!] Git index was corrupt - rebuilding it..." -ForegroundColor Yellow
+        Remove-Item (Join-Path $root ".git\index") -Force -ErrorAction SilentlyContinue
+        git status --porcelain 2>&1 | Out-Null
+    }
     git add frontend/backend.json 2>&1 | Out-Null
     git commit -m "chore: refresh tunnel address" 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {

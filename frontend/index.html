@@ -521,6 +521,7 @@ async function discoverBackend(force) {
       if (winner) localStorage.setItem(LS_BACKEND, winner);
       else localStorage.removeItem(LS_BACKEND);
     } catch (e) { /* private mode */ }
+    if (typeof setBackendLabel === "function") setBackendLabel();
     return winner;
   }
   return apiBase();                         // nothing healthy: keep what we had
