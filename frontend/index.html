@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Local Image Studio — CPU AI Image Generation</title>
 <meta name="description" content="Local, private, CPU-only Stable Diffusion 1.5 image generation studio tuned for 8 GB RAM." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%E2%9C%A8%3C/text%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -106,7 +107,9 @@
     <h2 class="text-sm font-bold text-white">Backend connection</h2>
     <p class="mt-1.5 text-[12px] leading-relaxed text-slate-400">
       <b>On your PC</b> (opened via <code class="text-brand-300">start.bat</code>) leave this empty — the page talks to the server it was served from.
-      <b>On Vercel / mobile</b>, paste the public URL printed by <code class="text-brand-300">tunnel.bat</code>.
+      <b>On Vercel / mobile</b> the page finds your PC by itself as soon as
+      <code class="text-brand-300">tunnel.bat</code> is running — wait about a minute and it connects on its
+      own, no need to paste anything. (The box below is only to override it or point at another backend.)
     </p>
     <input id="backendInput" type="url" inputmode="url" autocomplete="off" spellcheck="false"
       placeholder="https://xxxx-xxxx.trycloudflare.com"
@@ -436,6 +439,91 @@ function absUrl(url) {
 function isLocalHost() {
   const h = location.hostname;
   return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "";
+}
+
+/* ── Automatic backend discovery ───────────────────────────────────────
+ * tunnel.bat on the PC publishes its current https:// address to
+ *   · /backend.json on this site, and
+ *   · the raw GitHub copy of the same file (visible seconds after the
+ *     push, without waiting for the Vercel rebuild).
+ * On load — and every ~15 s while offline — we probe those addresses
+ * together with the saved one and the local machine, and connect to the
+ * first backend that answers /api/health. Nothing to copy or paste.  */
+const RAW_BACKEND_FILE =
+  "https://raw.githubusercontent.com/zakirullah8434-sudo/image/main/frontend/backend.json";
+let lastDiscoverAt = 0;
+
+async function probeBackend(base, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || 2500);
+  try {
+    const res = await fetch(base + "/api/health", { cache: "no-store", signal: ctrl.signal });
+    if (!res.ok) return false;
+    const data = await res.json();   // a static host answers HTML -> throws here
+    return !!data && typeof data === "object";
+  } catch (e) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchTunnelUrl(source) {
+  try {
+    const res = await fetch(source, { cache: "no-store" });
+    if (!res.ok) return "";
+    const data = await res.json();
+    return (data && typeof data.url === "string") ? data.url.replace(/\/+$/, "") : "";
+  } catch (e) {
+    return "";   // file not published yet (first run) or offline
+  }
+}
+
+function explicitApiParam() {
+  try {
+    const q = new URLSearchParams(location.search).get("api");
+    return q ? q.replace(/\/+$/, "") : "";
+  } catch (e) { return ""; }
+}
+
+/* Ordered candidate list; "" means "same origin" (the local server). */
+function backendCandidates(tunnelUrls) {
+  const list = [];
+  const add = (b) => { if (list.indexOf(b) === -1) list.push(b); };
+  const explicit = explicitApiParam();
+  if (explicit) return [explicit];          // ?api= always wins
+  if (isLocalHost()) add("");               // served by start.bat -> same origin
+  add(apiBase());                           // address saved earlier (or via ?api=)
+  (tunnelUrls || []).forEach((u) => {
+    u = (u || "").replace(/\/+$/, "");
+    if (u) add(u);
+  });
+  add("http://127.0.0.1:8000");             // the PC itself, if the page runs there
+  add("http://localhost:8000");
+  return list;
+}
+
+/* Probe every candidate in parallel; persist the first healthy one. */
+async function discoverBackend(force) {
+  const now = Date.now();
+  if (!force && now - lastDiscoverAt < 15000) return apiBase();
+  lastDiscoverAt = now;
+  const [sameUrl, rawUrl] = await Promise.all([
+    fetchTunnelUrl("/backend.json"),
+    fetchTunnelUrl(RAW_BACKEND_FILE + "?cb=" + now)
+  ]);
+  const candidates = backendCandidates([sameUrl, rawUrl]);
+  const results = await Promise.all(candidates.map((b) => probeBackend(b)));
+  for (let i = 0; i < candidates.length; i++) {
+    if (!results[i]) continue;
+    const winner = candidates[i];
+    try {
+      if (winner) localStorage.setItem(LS_BACKEND, winner);
+      else localStorage.removeItem(LS_BACKEND);
+    } catch (e) { /* private mode */ }
+    return winner;
+  }
+  return apiBase();                         // nothing healthy: keep what we had
 }
 
 async function api(path, options) {
@@ -853,17 +941,28 @@ async function pingHealth() {
     $("ramPill").classList.remove("hidden");
     $("ramPill").classList.add("flex");
     if (h.model_loaded) $("footTorch").textContent = "PyTorch " + h.torch + " · model loaded";
+    closeBackendModal();                 // connected -> dismiss the prompt
   } catch (e) {
     $("statusDot").className = "h-1.5 w-1.5 rounded-full bg-rose-400";
     $("statusPill").className = "flex items-center gap-2 rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1.5 text-rose-300";
     $("statusText").textContent = "Offline";
-    // Nothing configured yet -> explain what to do, once per page load.
+    // Nothing configured yet -> explain how it works, once per page load.
     if (!apiBase() && !backendPromptShown) {
       backendPromptShown = true;
       openBackendModal(isLocalHost()
         ? "No backend answered on this page. Run start.bat in the project folder, then reload."
-        : "This copy is hosted (Vercel), so it needs your PC. On your PC run start.bat, " +
-          "then tunnel.bat, and paste the https:// address it prints here.");
+        : "Looking for your PC… On your PC run start.bat, then tunnel.bat — this page " +
+          "finds the tunnel and connects by itself within about a minute. Nothing to paste.");
+    }
+    // tunnel.bat may have just published a new address — look for it
+    // (discoverBackend throttles itself to once per 15 s).
+    const before = apiBase();
+    const base = await discoverBackend();
+    if (base !== before) {
+      toast("Connected to your PC automatically", "success");
+      loadModels();
+      loadGallery();
+      pingHealth();                      // confirm right away (bounded: base is set now)
     }
   }
 }
@@ -872,6 +971,7 @@ async function pingHealth() {
 (async function boot() {
   $("promptCount").textContent = $("prompt").value.length;
   paintRange($("steps")); paintRange($("cfg"));
+  await discoverBackend(true);           // find the PC before the first requests
   await Promise.all([loadModels(), loadGallery(), pingHealth()]);
   setInterval(pingHealth, 10000);
 })();

@@ -12,3 +12,4 @@ backend/
 start.bat
 start.sh
 tunnel.bat
+tunnel.ps1

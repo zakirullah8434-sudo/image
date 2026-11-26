@@ -75,6 +75,8 @@ rem --- [4/4] launch ---------------------------------------------------
 echo.
 echo  [4/4] Starting the studio...
 echo         URL : http://%HOST%:%PORT%
+echo         Phone: also run tunnel.bat - it connects the hosted
+echo                page to this PC by itself (no URL to paste)
 echo         Stop: close this window or press Ctrl+C
 echo.
 

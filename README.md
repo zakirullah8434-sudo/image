@@ -185,13 +185,16 @@ local-image-studio/
 │   ├── setup_model.py      # model auto-downloader / integrity verifier
 │   └── requirements.txt    # CPU-only dependency pins
 ├── frontend/
-│   └── index.html          # the whole studio UI (single file)
+│   ├── index.html          # the whole studio UI (single file)
+│   ├── 404.html            # sends unknown URLs back to the app
+│   └── backend.json        # current tunnel address (written by tunnel.bat)
 ├── models/                 # .safetensors checkpoints (auto-created, never committed)
 ├── outputs/                # auto-saved timestamped PNGs (never committed)
 ├── venv/                   # virtual environment (auto-created)
 ├── start.bat               # Windows one-click launch
 ├── start.sh                # Linux / macOS launch
 ├── tunnel.bat              # public https:// tunnel for the backend (Vercel/phone use)
+├── tunnel.ps1              #   └─ publishes the tunnel address to the site by itself
 ├── vercel.json             # static-host config: serves frontend/ only
 ├── .gitignore              # keeps venv/ 2 GB model/outputs out of git
 └── .vercelignore           # keeps Vercel's upload limited to frontend/
@@ -239,26 +242,32 @@ The same `frontend/index.html` works two ways:
 ### Step 2 — expose your PC
 
 1. Run **`start.bat`** and leave it open (backend on `127.0.0.1:8000`).
-2. Run **`tunnel.bat`** in a second window. It downloads cloudflared once (~40 MB), then
-   prints a public address:
+2. Run **`tunnel.bat`** in a second window. It downloads cloudflared once (~40 MB), starts a
+   public address like
 
    ```
    https://xxxx-xxxx.trycloudflare.com
    ```
 
-3. Leave that window open — closing it stops the tunnel. The address changes each run.
+   and **publishes that address to the website by itself** — it writes `frontend/backend.json`,
+   commits and pushes, and the hosted page picks the new address up (usually within seconds via
+   the raw GitHub copy, at worst after the ~1-minute Vercel rebuild). Nothing to copy, nothing
+   to paste.
+3. Leave that window open — closing it stops the tunnel. The address changes each run, which is
+   fine: every run is published the same automatic way.
 
 ### Step 3 — connect on any device
 
 1. Open your Vercel URL on PC **or phone**.
-2. Click the **`local`** button in the top bar → paste the `https://….trycloudflare.com`
-   address → **Connect**.
-3. Status turns green (*Server online*), the model list and gallery load, and Generate works.
-   The choice is remembered in that browser (`localStorage`), so you only do this once per
-   device.
+2. Wait for it: the page probes your PC every few seconds and the status turns green
+   (*Server online*) by itself — the model list and gallery load and Generate works.
+   It reconnects automatically after `tunnel.bat` restarts with a brand-new address.
+3. The working address is remembered in that browser (`localStorage`), so later visits
+   reconnect even faster.
 
-Shortcut: you can also open `https://your-app.vercel.app/?api=https://xxxx.trycloudflare.com`
-to connect without clicking through the modal.
+The **`local`** button in the top bar remains as a manual override (for example to point at a
+LAN IP), and opening `https://your-app.vercel.app/?api=https://xxxx.trycloudflare.com` still
+forces a specific backend.
 
 **Requirements:** `start.bat` **and** `tunnel.bat` must stay running on your PC, and the PC
 must stay awake. Tunneling is a plain HTTPS proxy — your prompts and images travel only
@@ -277,10 +286,11 @@ between your device and your own machine.
 | Download interrupted | `python backend/setup_model.py` resumes/ retries automatically |
 | Want to re-download the model | delete the file in `models\` then run `setup_model.py --force` |
 | Need more page file | System → Advanced → Performance → Virtual memory (the app never relies on it, but it helps on 8 GB) |
-| Hosted page says **Offline** / modal about a backend | expected on Vercel until you connect: run `start.bat` + `tunnel.bat` on the PC and paste the tunnel URL via the **local** button |
-| *"did not answer with JSON"* / tunnel errors | `tunnel.bat` window was closed or the PC slept — rerun it and reconnect with the **new** address |
+| Hosted page says **Offline** / modal about a backend | run `start.bat` + `tunnel.bat` on the PC and leave both open — the page connects **by itself** within a minute (it re-checks every few seconds). The modal only appears while no tunnel is running |
+| *"did not answer with JSON"* / tunnel errors | `tunnel.bat` window was closed or the PC slept — rerun it; the page picks up the **new** address automatically, nothing to paste |
 | `409 Conflict` on Generate | one generation is already running — wait for it (a second one would double peak RAM) |
-| Images 404 on the hosted page | the stored tunnel address is stale — reconnect via the **local** button with the current `trycloudflare.com` URL |
+| Images 404 on the hosted page | the saved tunnel address is stale — rerun `tunnel.bat`; the page refreshes its address automatically (or override it with the **local** button) |
+| Unknown/deep URL shows a 404 | `frontend/404.html` redirects unknown paths back to the app — if you get Vercel's plain 404 instead, that file was deleted from `frontend/` |
 | Hosted URL returns **404 on every path** (incl. `/`) | Vercel **Root Directory** is set to something (e.g. `backend`) — clear it in Settings → General, and confirm Framework Preset = **Other**. Then redeploy |
 | Hosted URL shows a **Vercel "Log in" page** | Deployment Protection → **Require Log In** is on — turn it off (Settings → Deployment Protection) |
 | `skyhoniximage.vercel.app` 404 but the deployment looks Ready | the deployment predates the settings fix — push a commit (or click **Redeploy**) so Vercel rebuilds with the correct root |
