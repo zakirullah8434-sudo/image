@@ -98,6 +98,8 @@ _pipe_model: str | None = None    # file name currently loaded
 _img2img = None                   # img2img view over _pipe (shares the weights)
 _gen_lock = threading.Lock()      # serialise generation - never two at once
 _model_lock = threading.Lock()    # serialise model (re)loading
+_gen_acquired_at = 0.0            # when the current holder took _gen_lock
+                                  # (used to recover a leaked lock - see api_generate)
 
 # Current/last job - lets a client whose POST was cut mid-generation (Cloudflare
 # drops proxied requests after ~100 s while a CPU run takes minutes) poll
@@ -418,7 +420,7 @@ def api_generate(req: GenerateRequest) -> dict:
 
     Without ``image_b64`` this is plain txt2img; with it, img2img editing.
     """
-    global _pipe, _pipe_model, _img2img
+    global _pipe, _pipe_model, _img2img, _gen_acquired_at
 
     # ---- validate + clamp (768 px ceiling so 8 GB RAM never crashes) ------- #
     prompt = req.prompt.strip()
@@ -440,13 +442,34 @@ def api_generate(req: GenerateRequest) -> dict:
         strength_val = _clamp_float(req.strength, 0.05, 0.95, 0.55)
 
     # ---- never two generations at once (would double peak RAM) ------------ #
-    if not _gen_lock.acquire(blocking=False):
-        if init_image is not None:
-            init_image.close()
-        raise HTTPException(
-            status_code=409,
-            detail="A generation is already running - please wait for it to finish.",
-        )
+    acquired = _gen_lock.acquire(blocking=False)
+    if not acquired:
+        # A job may genuinely be running (the user just can't see it), or a
+        # handler may have leaked the lock. A healthy holder flips
+        # _job["running"] to True within milliseconds of acquiring, so
+        # "lock held + nothing running for >15 s" means it leaked -> take it.
+        with _job_lock:
+            job_running = _job["running"]
+            job_started = _job["started_at"]
+        if (
+            not job_running
+            and _gen_acquired_at
+            and (time.time() - _gen_acquired_at) > 15.0
+        ):
+            try:
+                _gen_lock.release()          # reclaim the leaked lock
+                acquired = _gen_lock.acquire(blocking=False)
+            except RuntimeError:
+                acquired = False
+        if not acquired:
+            if init_image is not None:
+                init_image.close()
+            detail = "A generation is already running"
+            if job_running and job_started:
+                detail += f" ({int(time.time() - job_started)}s so far)"
+            detail += " - please wait for it to finish."
+            raise HTTPException(status_code=409, detail=detail)
+    _gen_acquired_at = time.time()
 
     load_seconds = 0.0
     try:

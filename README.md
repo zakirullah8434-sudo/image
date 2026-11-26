@@ -1,8 +1,8 @@
 # Local Image Studio
 
 A complete, **local, private, CPU-only** AI image generation web app built for a machine with
-**8 GB RAM and no dedicated GPU**. Everything runs on your own PC — no cloud, no API keys, no
-images leaving the machine.
+**8 GB RAM and no dedicated GPU** — plus an **Online mode** that creates images through a
+hosted service straight from the browser, so it works even when the PC is off.
 
 | | |
 |---|---|
@@ -12,6 +12,7 @@ images leaving the machine.
 | Resolution | hard-clamped to **≤ 768 px** so 8 GB RAM never crashes |
 | Backend | FastAPI + Uvicorn on `http://127.0.0.1:8000` |
 | Frontend | one file, `frontend/index.html` (Tailwind via CDN, vanilla JS) |
+| Modes | **Local** (this PC, private, img2img) and **Online** (hosted, PC not needed) |
 
 ---
 
@@ -40,7 +41,17 @@ chmod +x start.sh
 
 ## 2. How to use it
 
-Open **http://127.0.0.1:8000**
+Open **http://127.0.0.1:8000** (or the hosted Vercel URL).
+
+**First you pick a mode** — a chooser appears every time the page opens, and the
+**pill in the top bar** switches any time:
+
+| Mode | What it does |
+|------|--------------|
+| 🌐 **Online — hosted** | Images are created by a hosted AI service called directly from your browser. **Your PC does not need to be on**, works on any phone/laptop, no setup. Your prompt is sent to that third party. |
+| 🖥️ **Local — on this PC** | Stable Diffusion runs on your own computer — 100% private, offline, supports image editing (img2img) and your own model files. Needs `start.bat` (and `tunnel.bat` for phones). |
+
+The steps below describe **Local mode**:
 
 1. **Prompt** — describe the image. Click the preset chips (*Photorealistic, Portrait,
    Cinematic, Anime, Fantasy, Sci-Fi, Product*) to append style keywords; click again to remove.
@@ -306,7 +317,7 @@ between your device and your own machine.
 | Need more page file | System → Advanced → Performance → Virtual memory (the app never relies on it, but it helps on 8 GB) |
 | Hosted page says **Offline** / modal about a backend | run `start.bat` + `tunnel.bat` on the PC and leave both open — the page connects **by itself** within a minute (it re-checks every few seconds). The modal only appears while no tunnel is running |
 | *"did not answer with JSON"* / tunnel errors | `tunnel.bat` window was closed or the PC slept — rerun it; the page picks up the **new** address automatically, nothing to paste |
-| `409 Conflict` on Generate | one generation is already running — wait for it (a second one would double peak RAM) |
+| `409 Conflict` on Generate | another image is really still generating — the page now detects that and waits for it automatically; if nothing is running, just press Generate again |
 | Images 404 on the hosted page | the saved tunnel address is stale — rerun `tunnel.bat`; the page refreshes its address automatically (or override it with the **local** button) |
 | Unknown/deep URL shows a 404 | `frontend/404.html` redirects unknown paths back to the app — if you get Vercel's plain 404 instead, that file was deleted from `frontend/` |
 | Hosted URL returns **404 on every path** (incl. `/`) | Vercel **Root Directory** is set to something (e.g. `backend`) — clear it in Settings → General, and confirm Framework Preset = **Other**. Then redeploy |
