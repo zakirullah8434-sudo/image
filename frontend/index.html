@@ -172,6 +172,36 @@
         <button class="chip rounded-full border border-white/10 bg-ink-850 px-2.5 py-1 text-[11px] text-slate-400 hover:border-brand-500/50 hover:text-brand-300"
                 data-suffix="product photography, studio lighting, commercial shot">Product</button>
       </div>
+
+      <!-- Attach an image to edit (img2img) -->
+      <button id="attachBtn" type="button"
+        class="mt-2.5 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-ink-850/60 px-3 py-2.5 text-[12px] text-slate-400 transition hover:border-brand-500/60 hover:text-brand-300">
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="9" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+        Attach an image to edit
+      </button>
+      <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" />
+
+      <div id="attachWrap" class="hidden mt-2.5 rounded-xl border border-brand-500/30 bg-brand-500/5 p-3">
+        <div class="flex items-center gap-3">
+          <img id="attachThumb" alt="Attached image" class="h-14 w-14 shrink-0 rounded-lg object-cover ring-1 ring-white/15" />
+          <div class="min-w-0 flex-1">
+            <p id="attachName" class="truncate text-[12px] font-medium text-slate-200">image.png</p>
+            <p id="attachInfo" class="text-[10.5px] text-slate-500">the prompt will edit this image</p>
+          </div>
+          <button id="removeAttach" type="button" title="Remove image"
+            class="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-white/10 text-slate-400 transition hover:border-rose-400/50 hover:text-rose-300">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="mt-3">
+          <div class="mb-1.5 flex items-center justify-between">
+            <label for="strength" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Edit strength</label>
+            <span id="strengthVal" class="rounded-md bg-ink-850 px-2 py-0.5 font-mono text-[12px] font-semibold text-brand-300">0.55</span>
+          </div>
+          <input id="strength" type="range" min="0.1" max="0.95" step="0.05" value="0.55" />
+          <div class="mt-1 flex justify-between text-[10px] text-slate-600"><span>0.10 · keep almost everything</span><span>0.95 · reinvent</span></div>
+        </div>
+      </div>
     </div>
 
     <!-- Negative prompt -->
@@ -279,6 +309,10 @@
             <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
             Copy Seed
           </button>
+          <button id="editResultBtn" disabled class="hidden items-center gap-1.5 rounded-lg border border-white/10 bg-ink-850 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-brand-400/50 hover:text-brand-300 disabled:opacity-40">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            Edit this image
+          </button>
         </div>
       </div>
 
@@ -381,6 +415,7 @@
 /* ═══════════════════════════════ STATE ═══════════════════════════════ */
 const $ = (id) => document.getElementById(id);
 let busy = false;
+let recoveryMode = false;    // true while polling /api/job after a cut connection
 let timerHandle = null;
 let startedAt = 0;
 let currentSeed = null;
@@ -389,6 +424,88 @@ let currentFilename = null;
 let modelLoadedOnce = false;
 
 const DEFAULT_NEGATIVE = $("negative").value;
+
+/* ═══════════════════════ ATTACHED IMAGE (img2img) ═══════════════════════ */
+/* An optional upload that turns Generate into an edit: the backend starts
+ * from this image (strength slider = how far the prompt may transform it). */
+let attachedImage = null;          // { dataUrl, name, w, h }
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(new Error("could not read the file"));
+    fr.readAsDataURL(file);
+  });
+}
+
+function loadImageEl(src) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error("not a decodable image"));
+    im.src = src;
+  });
+}
+
+/* Downscale on a canvas first: keeps the JSON payload small over the tunnel
+ * and spares the backend from chewing through a 12 MP photo. Transparency is
+ * flattened onto white so PNG screenshots don't come out with a black bg. */
+async function prepareAttachment(file) {
+  if (file.size > 25 * 1024 * 1024) throw new Error("image is over 25 MB");
+  const dataUrl = await readFileAsDataURL(file);
+  const im = await loadImageEl(dataUrl);
+  const maxSide = 1024;
+  const scale = Math.min(1, maxSide / Math.max(im.naturalWidth, im.naturalHeight));
+  const w = Math.max(1, Math.round(im.naturalWidth * scale));
+  const h = Math.max(1, Math.round(im.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(im, 0, 0, w, h);
+  return {
+    dataUrl: canvas.toDataURL("image/jpeg", 0.92),
+    name: file.name || "image.jpg",
+    w: im.naturalWidth,
+    h: im.naturalHeight,
+  };
+}
+
+function renderAttachment() {
+  const on = !!attachedImage;
+  $("attachWrap").classList.toggle("hidden", !on);
+  $("attachBtn").classList.toggle("hidden", on);
+  if (on) {
+    $("attachThumb").src = attachedImage.dataUrl;
+    $("attachName").textContent = attachedImage.name;
+    $("attachInfo").textContent =
+      attachedImage.w + " × " + attachedImage.h + " px · prompt edits this image";
+    $("strengthVal").textContent = parseFloat($("strength").value).toFixed(2);
+  }
+}
+
+async function attachFromFile(file) {
+  if (!file) return;
+  if (file.type && !/^image\/(png|jpe?g|webp|gif|bmp|avif)$/i.test(file.type)) {
+    toast("Use a PNG, JPG or WebP image.", "warn");
+    return;
+  }
+  try {
+    attachedImage = await prepareAttachment(file);
+    renderAttachment();
+    toast("Image attached — describe the edit, then press Generate.", "info");
+  } catch (e) {
+    toast("Could not use that image (" + (e.message || e) + ").", "error");
+  }
+}
+
+function clearAttachment() {
+  attachedImage = null;
+  renderAttachment();
+}
 
 /* ═══════════════════════════════ TOAST ═══════════════════════════════ */
 let toastTimer = null;
@@ -666,6 +783,9 @@ function showGalleryImage(img, btn) {
   $("copySeedBtn").disabled = seed === null;
   $("copySeedBtn").classList.remove("hidden");
   $("copySeedBtn").classList.add("flex");
+  $("editResultBtn").disabled = false;
+  $("editResultBtn").classList.remove("hidden");
+  $("editResultBtn").classList.add("flex");
 }
 
 /* ═══════════════════════════════ CONTROLS ═══════════════════════════════ */
@@ -742,7 +862,7 @@ function startTimer() {
     } else {
       $("bigPhase").textContent = "denoising on CPU · " + currentSteps() + " steps";
     }
-    if (s > 45) {
+    if (s > 45 && !recoveryMode) {
       $("loadingNote").textContent = "Still working — CPU generation is slow by nature. Larger sizes take longer.";
     }
   };
@@ -753,6 +873,112 @@ function stopTimer() { clearInterval(timerHandle); timerHandle = null; }
 function currentSteps() { return $("steps").value; }
 
 /* ═══════════════════════════════ GENERATE ═══════════════════════════════ */
+/* ═════════════════ RESULT RENDERING + RECOVERY ═════════════════ */
+/* Shared by a normal success and by the /api/job recovery path. */
+function renderResult(data) {
+  $("resultImg").src = "data:" + data.mime + ";base64," + data.image_base64;
+  $("loadingState").classList.add("hidden");
+  $("resultState").classList.remove("hidden");
+
+  const badge = $("resultBadge");
+  badge.textContent = (data.mode === "img2img" ? "edited · str " + data.strength + " · " : "")
+    + data.total_time_seconds + "s total · " + (data.model_load_seconds > 0 ? "first load " + data.model_load_seconds + "s · " : "") + "inference " + data.generation_time_seconds + "s";
+  badge.classList.remove("hidden");
+
+  $("metaTime").textContent = data.generation_time_seconds + "s";
+  $("metaSeed").textContent = data.seed;
+  $("metaSize").textContent = data.width + "×" + data.height;
+  $("metaSteps").textContent = data.steps + " / " + data.guidance_scale;
+  $("metaRam").textContent = data.peak_ram_gb + " GB";
+  $("metaModel").textContent = data.model_name.replace(/\.safetensors$/i, "");
+  $("metaModel").title = data.model_name;
+  $("peakRam").textContent = data.peak_ram_gb + " GB";
+
+  currentSeed = data.seed;
+  currentUrl = "data:" + data.mime + ";base64," + data.image_base64;
+  currentFilename = data.filename;
+
+  $("downloadBtn").disabled = false;
+  $("downloadBtn").classList.remove("hidden"); $("downloadBtn").classList.add("flex");
+  $("copySeedBtn").disabled = false;
+  $("copySeedBtn").classList.remove("hidden"); $("copySeedBtn").classList.add("flex");
+  $("editResultBtn").disabled = false;
+  $("editResultBtn").classList.remove("hidden"); $("editResultBtn").classList.add("flex");
+
+  $("liveStatus").classList.add("hidden");
+  const summary = (data.mode === "img2img" ? "Edited in " : "Generated in ")
+    + data.generation_time_seconds + "s · peak RAM " + data.peak_ram_gb + " GB";
+  if (data.peak_ram_gb > 5.5) {
+    toast(summary + " — above the 5.5 GB target. Try 512×512 or fewer steps.", "warn");
+  } else if (data.ram_warning) {
+    toast(summary + ". " + data.ram_warning, "warn");
+  } else {
+    toast(summary, "success");
+  }
+}
+
+function failUI() {
+  $("loadingState").classList.add("hidden");
+  if ($("resultImg").src) { $("resultState").classList.remove("hidden"); }
+  else { $("emptyState").classList.remove("hidden"); }
+  $("liveStatus").classList.add("hidden");
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/* The POST itself was cut: Cloudflare's edge drops proxied requests after
+ * ~100 s while a CPU run takes minutes, and tunnels flap. Network-level
+ * failure (no status) or a gateway/edge status (502/504/52x) counts; our
+ * own 4xx/500/503 answers are real results and must NOT trigger recovery. */
+function isConnectionCut(e) {
+  if (!e) return false;
+  if (typeof e.status !== "number") return true;      // fetch() itself threw
+  return e.status === 502 || e.status === 504 || (e.status >= 520 && e.status <= 530);
+}
+
+/* The PC keeps generating after the connection dies. Poll /api/job every 5 s:
+ *  · result arrives  -> render it like a normal success
+ *  · error arrives   -> surface the PC's own message (e.g. the RAM guard)
+ *  · job never there -> bail early with a clear message instead of waiting
+ *  · otherwise wait up to 30 min (768px runs take ~20 min on this CPU).     */
+async function waitForJob(since) {
+  const giveUpAt = Date.now() + 30 * 60 * 1000;
+  let sawRunning = false;
+  let idlePolls = 0;
+  let failedPolls = 0;
+  recoveryMode = true;
+  $("loadingNote").textContent = "Connection dropped — your PC keeps generating, waiting for the result…";
+  while (Date.now() < giveUpAt) {
+    await sleep(5000);
+    let job = null;
+    try {
+      const res = await fetch(apiUrl("/api/job?since=" + since), { cache: "no-store" });
+      if (res.ok) { job = await res.json(); failedPolls = 0; }
+      else failedPolls++;
+    } catch (e) {
+      failedPolls++;
+    }
+    if (job) {
+      if (job.result) return { result: job.result };
+      if (job.error) return { error: job.error };
+      if (job.running) {
+        sawRunning = true;
+        idlePolls = 0;
+        $("loadingNote").textContent =
+          "Connection dropped — your PC is still generating (" +
+          Math.round(job.running_for_seconds || 0) + "s)…";
+        continue;
+      }
+      idlePolls++;
+      // No sign our job ever started (or the server restarted mid-run):
+      // don't make the user wait the full 30 minutes for nothing.
+      if (idlePolls >= (sawRunning ? 24 : 4)) return { lost: true };
+    }
+    if (failedPolls >= 12) return { lost: true };   // ~60 s of dead tunnel
+  }
+  return null;
+}
+
 async function generate() {
   if (busy) return;
 
@@ -774,12 +1000,20 @@ async function generate() {
     seed: parseInt($("seed").value, 10),
     model_name: $("modelSelect").value,
   };
+  if (attachedImage) {
+    payload.image_b64 = attachedImage.dataUrl;      // data:image/jpeg;base64,…
+    payload.strength = parseFloat($("strength").value);
+  }
 
   setBusy(true);
+  recoveryMode = false;
+  const jobSince = Date.now() / 1000;   // /api/job freshness marker for recovery
   $("emptyState").classList.add("hidden");
   $("resultState").classList.add("hidden");
   $("loadingState").classList.remove("hidden");
-  $("loadingNote").textContent = "Building latents with Euler Ancestral · attention slicing on";
+  $("loadingNote").textContent = attachedImage
+    ? "Editing your image · img2img · strength " + payload.strength.toFixed(2)
+    : "Building latents with Euler Ancestral · attention slicing on";
   startTimer();
 
   try {
@@ -791,54 +1025,37 @@ async function generate() {
 
     modelLoadedOnce = true;
     stopTimer();
-
-    $("resultImg").src = "data:" + data.mime + ";base64," + data.image_base64;
-    $("loadingState").classList.add("hidden");
-    $("resultState").classList.remove("hidden");
-
-    const badge = $("resultBadge");
-    badge.textContent = data.total_time_seconds + "s total · " + (data.model_load_seconds > 0 ? "first load " + data.model_load_seconds + "s · " : "") + "inference " + data.generation_time_seconds + "s";
-    badge.classList.remove("hidden");
-
-    $("metaTime").textContent = data.generation_time_seconds + "s";
-    $("metaSeed").textContent = data.seed;
-    $("metaSize").textContent = data.width + "×" + data.height;
-    $("metaSteps").textContent = data.steps + " / " + data.guidance_scale;
-    $("metaRam").textContent = data.peak_ram_gb + " GB";
-    $("metaModel").textContent = data.model_name.replace(/\.safetensors$/i, "");
-    $("metaModel").title = data.model_name;
-    $("peakRam").textContent = data.peak_ram_gb + " GB";
-
-    currentSeed = data.seed;
-    currentUrl = "data:" + data.mime + ";base64," + data.image_base64;
-    currentFilename = data.filename;
-
-    $("downloadBtn").disabled = false;
-    $("downloadBtn").classList.remove("hidden"); $("downloadBtn").classList.add("flex");
-    $("copySeedBtn").disabled = false;
-    $("copySeedBtn").classList.remove("hidden"); $("copySeedBtn").classList.add("flex");
-
-    $("liveStatus").classList.add("hidden");
-    const summary = "Generated in " + data.generation_time_seconds + "s · peak RAM " + data.peak_ram_gb + " GB";
-    if (data.peak_ram_gb > 5.5) {
-      toast(summary + " — above the 5.5 GB target. Try 512×512 or fewer steps.", "warn");
-    } else if (data.ram_warning) {
-      toast(summary + ". " + data.ram_warning, "warn");
-    } else {
-      toast(summary, "success");
-    }
-
+    renderResult(data);
     loadGallery();
     pingHealth();
   } catch (e) {
     stopTimer();
-    $("loadingState").classList.add("hidden");
-    if ($("resultImg").src) { $("resultState").classList.remove("hidden"); }
-    else { $("emptyState").classList.remove("hidden"); }
-    $("liveStatus").classList.add("hidden");
+    if (isConnectionCut(e)) {
+      // Cloudflare's ~100 s edge timeout (or a tunnel flap) cut the POST,
+      // but the PC keeps working - poll /api/job for the finished result.
+      const outcome = await waitForJob(jobSince);
+      if (outcome && outcome.result) {
+        modelLoadedOnce = true;
+        renderResult(outcome.result);
+        toast("Result arrived from your PC — the connection dropped mid-generation.", "success");
+        loadGallery();
+        pingHealth();
+        return;
+      }
+      const msg = outcome && outcome.error ? outcome.error.message
+        : outcome && outcome.lost
+          ? "The request never reached your PC. Check that tunnel.bat is running on your PC, then try again."
+          : "Gave up after 30 minutes without a result. Check tunnel.bat — the image may still be in the gallery.";
+      failUI();
+      toast(msg, "error");
+      loadGallery();
+      return;
+    }
+    failUI();
     toast(e.message, e.status === 409 ? "warn" : "error");
   } finally {
     setBusy(false);
+    recoveryMode = false;
   }
 }
 
@@ -854,6 +1071,36 @@ function setBusy(value) {
 $("generateBtn").addEventListener("click", generate);
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); }
+});
+
+/* ── image attachment (img2img editing) ─────────────────────────────── */
+$("attachBtn").addEventListener("click", () => $("fileInput").click());
+$("fileInput").addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";               // clear so the same file can be re-picked
+  if (f) attachFromFile(f);
+});
+$("removeAttach").addEventListener("click", () => {
+  clearAttachment();
+  toast("Image removed — back to normal generation.", "info");
+});
+$("strength").addEventListener("input", () => {
+  $("strengthVal").textContent = parseFloat($("strength").value).toFixed(2);
+});
+
+/* Re-attach whatever is on screen now (a fresh result or a gallery image)
+ * so the next Generate edits it instead of starting from noise. */
+$("editResultBtn").addEventListener("click", async () => {
+  if (!currentUrl) return;
+  try {
+    const res = await fetch(currentUrl, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const blob = await res.blob();
+    await attachFromFile(new File([blob], currentFilename || "image.png", { type: blob.type || "image/png" }));
+    $("prompt").focus();
+  } catch (e) {
+    toast("Could not load that image for editing: " + e.message, "error");
+  }
 });
 
 /* ═══════════════════════════════ ACTIONS ═══════════════════════════════ */

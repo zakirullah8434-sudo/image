@@ -32,6 +32,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from setup_model import FRONTEND_DIR, MODELS_DIR, OUTPUTS_DIR, ensure_dirs, list_models, verify_model
@@ -47,9 +48,12 @@ MAX_GUIDANCE = 20.0
 MIN_GUIDANCE = 1.0
 
 # Refuse to start a generation only in a genuine emergency (essentially no
-# commit headroom left). Below this, Windows' page file can absorb the rest.
+# commit headroom at all). This machine normally runs with ~1 GB free and
+# leans on the page file - the README documents paging as its normal mode -
+# so the floor is deliberately low: Windows pages cold model weights out
+# while the CPU grinds. Below the floor even opening a window would fail.
 # Override with the MIN_FREE_RAM_GB environment variable.
-MIN_FREE_RAM_GB = float(os.environ.get("MIN_FREE_RAM_GB", "1.0"))
+MIN_FREE_RAM_GB = float(os.environ.get("MIN_FREE_RAM_GB", "0.4"))
 
 # Softer threshold: below this we still generate (8 GB machines rarely have
 # more free), but we tell the user that closing apps will make it faster.
@@ -57,6 +61,11 @@ RAM_WARN_GB = float(os.environ.get("RAM_WARN_GB", "3.5"))
 
 GALLERY_LIMIT = 120
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+\.png$")
+
+# Uploaded-image guards (img2img editing). The UI downscales to <=1024 px on
+# the longest side before sending, so honest uploads are far below these.
+MAX_IMAGE_BYTES = 25 * 1024 * 1024   # refuse absurd payloads early
+MAX_IMAGE_PIXELS = 4096 * 4096       # decompression-bomb guard
 
 # torch/diffusers configuration
 torch.set_grad_enabled(False)
@@ -86,8 +95,22 @@ app.add_middleware(
 # --------------------------------------------------------------------------- #
 _pipe = None                      # loaded StableDiffusionPipeline (or None)
 _pipe_model: str | None = None    # file name currently loaded
+_img2img = None                   # img2img view over _pipe (shares the weights)
 _gen_lock = threading.Lock()      # serialise generation - never two at once
 _model_lock = threading.Lock()    # serialise model (re)loading
+
+# Current/last job - lets a client whose POST was cut mid-generation (Cloudflare
+# drops proxied requests after ~100 s while a CPU run takes minutes) poll
+# /api/job for the finished payload instead of failing. See api_job().
+_job_lock = threading.Lock()
+_job: dict = {
+    "running": False,
+    "started_at": 0.0,
+    "result": None,
+    "result_at": 0.0,
+    "error": None,
+    "error_at": 0.0,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -191,7 +214,7 @@ def _resolve_model_name(model_name: str | None) -> Path:
 
 def load_pipeline(model_path: Path):
     """Load (or swap) the single-file checkpoint. Called under ``_model_lock``."""
-    global _pipe, _pipe_model
+    global _pipe, _pipe_model, _img2img
 
     if _pipe is not None and _pipe_model == model_path.name:
         return _pipe
@@ -202,6 +225,7 @@ def load_pipeline(model_path: Path):
         del _pipe
         _pipe = None
         _pipe_model = None
+        _img2img = None              # its components went away with _pipe
         gc.collect()
 
     from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionPipeline
@@ -259,6 +283,53 @@ def _next_output_path(seed: int, width: int, height: int) -> Path:
     return path
 
 
+def _decode_input_image(raw: str) -> Image.Image:
+    """Decode a ``data:...;base64,...`` URL or raw base64 string into RGB pixels."""
+    if not raw or not raw.strip():
+        raise HTTPException(status_code=400, detail="image_b64 is empty.")
+    payload = raw.split(",", 1)[1] if raw.startswith("data:") and "," in raw else raw
+    if len(payload) > MAX_IMAGE_BYTES * 2:   # cheap pre-check before decoding
+        raise HTTPException(status_code=400, detail="Image is too large (25 MB max).")
+    try:
+        blob = base64.b64decode(payload, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=400, detail="image_b64 is not valid base64."
+        ) from exc
+    if len(blob) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Image is too large (25 MB max).")
+    try:
+        img = Image.open(io.BytesIO(blob))
+        img.load()                     # force decode now; catches truncated files
+    except Exception as exc:            # noqa: BLE001 - any PIL failure = bad upload
+        raise HTTPException(
+            status_code=400,
+            detail="Could not decode that image - use PNG, JPEG or WebP.",
+        ) from exc
+    if img.width * img.height > MAX_IMAGE_PIXELS:
+        raise HTTPException(
+            status_code=400, detail="Image resolution is too high (max 4096x4096)."
+        )
+    return img.convert("RGB")
+
+
+def _fit_image(img: Image.Image, box_w: int, box_h: int) -> tuple[Image.Image, int, int]:
+    """Scale into the requested box, keep aspect ratio, snap to /8 for SD.
+
+    Returns ``(resized_image, width, height)`` - both clamped to <= MAX_DIM.
+    """
+    box_w = _clamp_dim(box_w)
+    box_h = _clamp_dim(box_h)
+    scale = min(box_w / img.width, box_h / img.height)
+    w = int(img.width * scale)
+    h = int(img.height * scale)
+    w = max(64, min(MAX_DIM, w - (w % 8)))
+    h = max(64, min(MAX_DIM, h - (h % 8)))
+    if (w, h) != img.size:
+        img = img.resize((w, h), Image.LANCZOS)
+    return img, w, h
+
+
 # --------------------------------------------------------------------------- #
 # Request schema
 # --------------------------------------------------------------------------- #
@@ -271,6 +342,12 @@ class GenerateRequest(BaseModel):
     guidance_scale: float = 7.0
     seed: int = -1
     model_name: str = ""
+    # --- img2img editing (optional) ------------------------------------- #
+    # When set, the image becomes the starting point and ``strength`` decides
+    # how far the prompt may transform it (0.05 = keep almost everything,
+    # 0.95 = almost a fresh generation that still follows the composition).
+    image_b64: str = ""              # data URL or raw base64 of the upload
+    strength: float = 0.55
 
 
 # --------------------------------------------------------------------------- #
@@ -337,8 +414,11 @@ def get_output(name: str) -> FileResponse:
 
 @app.post("/api/generate")
 def api_generate(req: GenerateRequest) -> dict:
-    """Run one CPU generation and return the PNG as base64 JSON."""
-    global _pipe, _pipe_model
+    """Run one CPU generation and return the PNG as base64 JSON.
+
+    Without ``image_b64`` this is plain txt2img; with it, img2img editing.
+    """
+    global _pipe, _pipe_model, _img2img
 
     # ---- validate + clamp (768 px ceiling so 8 GB RAM never crashes) ------- #
     prompt = req.prompt.strip()
@@ -352,8 +432,17 @@ def api_generate(req: GenerateRequest) -> dict:
     negative = (req.negative_prompt or "").strip()
     model_path = _resolve_model_name((req.model_name or "").strip())
 
+    # ---- optional input image (decoded before the lock: fails fast) -------- #
+    init_image = None
+    strength_val = None
+    if (req.image_b64 or "").strip():
+        init_image, width, height = _fit_image(_decode_input_image(req.image_b64), width, height)
+        strength_val = _clamp_float(req.strength, 0.05, 0.95, 0.55)
+
     # ---- never two generations at once (would double peak RAM) ------------ #
     if not _gen_lock.acquire(blocking=False):
+        if init_image is not None:
+            init_image.close()
         raise HTTPException(
             status_code=409,
             detail="A generation is already running - please wait for it to finish.",
@@ -361,17 +450,30 @@ def api_generate(req: GenerateRequest) -> dict:
 
     load_seconds = 0.0
     try:
-        _free_ram_guard()
-        ram_warning = _ram_note()
+        with _job_lock:
+            _job["running"] = True
+            _job["started_at"] = time.time()
 
         # ---- 8 GB RAM hygiene -------------------------------------------- #
         gc.collect()
+        _free_ram_guard()
+        ram_warning = _ram_note()
 
         with _model_lock:
             already_loaded = _pipe is not None and _pipe_model == model_path.name
             t_load = time.perf_counter()
             pipe = load_pipeline(model_path)
             load_seconds = 0.0 if already_loaded else time.perf_counter() - t_load
+
+        # ---- img2img wrapper: shares _pipe's weights (no extra model RAM) -- #
+        if init_image is not None and _img2img is None:
+            from diffusers import StableDiffusionImg2ImgPipeline
+
+            try:
+                _img2img = StableDiffusionImg2ImgPipeline.from_pipe(pipe)
+            except Exception:            # noqa: BLE001 - older/newer API shapes
+                _img2img = StableDiffusionImg2ImgPipeline(**pipe.components)
+            _img2img.set_progress_bar_config(disable=True)
 
         # ---- seed ---------------------------------------------------------- #
         seed = int(req.seed)
@@ -383,18 +485,33 @@ def api_generate(req: GenerateRequest) -> dict:
         gc.collect()
         t0 = time.perf_counter()
         with torch.inference_mode():
-            result = pipe(
-                prompt=prompt,
-                negative_prompt=negative or None,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                generator=generator,
-                output_type="pil",
-            )
+            if init_image is not None:
+                result = _img2img(
+                    prompt=prompt,
+                    negative_prompt=negative or None,
+                    image=init_image,
+                    strength=strength_val,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=generator,
+                    output_type="pil",
+                )
+            else:
+                result = pipe(
+                    prompt=prompt,
+                    negative_prompt=negative or None,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=generator,
+                    output_type="pil",
+                )
         elapsed = time.perf_counter() - t0
 
+        if init_image is not None:
+            init_image.close()
+            init_image = None
         image = result.images[0]
 
         # ---- save with a timestamp ---------------------------------------- #
@@ -409,7 +526,7 @@ def api_generate(req: GenerateRequest) -> dict:
         gc.collect()
         current_ram, peak_ram = _process_ram_gb()
 
-        return {
+        response = {
             "image_base64": image_b64,
             "mime": "image/png",
             "filename": out_path.name,
@@ -419,6 +536,8 @@ def api_generate(req: GenerateRequest) -> dict:
             "height": height,
             "steps": steps,
             "guidance_scale": guidance,
+            "mode": "img2img" if strength_val is not None else "txt2img",
+            "strength": round(strength_val, 2) if strength_val is not None else None,
             "model_name": model_path.name,
             "generation_time_seconds": round(elapsed, 2),
             "model_load_seconds": round(load_seconds, 2),
@@ -428,27 +547,65 @@ def api_generate(req: GenerateRequest) -> dict:
             "system_free_ram_gb": round(_system_free_gb(), 2),
             "ram_warning": ram_warning,
         }
+        with _job_lock:
+            _job.update(running=False, result=response, result_at=time.time())
+        return response
 
-    except HTTPException:
+    except HTTPException as exc:
+        # Record it too: a phone polling /api/job must see why it failed.
+        with _job_lock:
+            _job.update(
+                running=False,
+                error={"message": str(exc.detail)},
+                error_at=time.time(),
+            )
         raise
-    except MemoryError as exc:
-        gc.collect()
-        raise HTTPException(
-            status_code=507,
-            detail=(
-                "Ran out of memory. Close other applications, lower the resolution "
-                "to 512x512, reduce steps, and try again."
-            ),
-        ) from exc
     except Exception as exc:  # noqa: BLE001 - keep the server alive
         gc.collect()
         traceback.print_exc()
+        # CPU OOM surfaces as MemoryError or as torch's allocator RuntimeError.
+        low_mem = isinstance(exc, MemoryError) or any(
+            key in str(exc).lower()
+            for key in ("not enough memory", "defaultcpuallocator", "out of memory")
+        )
+        detail = (
+            "Ran out of memory. Close other applications, lower the resolution "
+            "to 512x512, reduce steps, and try again."
+            if low_mem
+            else f"Generation failed: {type(exc).__name__}: {exc}"
+        )
+        with _job_lock:
+            _job.update(running=False, error={"message": detail}, error_at=time.time())
         raise HTTPException(
-            status_code=500,
-            detail=f"Generation failed: {type(exc).__name__}: {exc}",
+            status_code=507 if low_mem else 500, detail=detail
         ) from exc
     finally:
+        with _job_lock:
+            _job["running"] = False
         _gen_lock.release()
+
+
+@app.get("/api/job")
+def api_job(since: float = 0.0) -> dict:
+    """Polling endpoint for clients whose POST was cut mid-generation.
+
+    Cloudflare's edge drops proxied requests after ~100 s while a CPU
+    generation takes minutes. The client passes the epoch time just before
+    it sent the POST (``since``) and gets back anything that finished after
+    that moment - the full payload, ready to render.
+    """
+    now = time.time()
+    with _job_lock:
+        started = _job["started_at"]
+        return {
+            "running": _job["running"],
+            "started_at": started,
+            "running_for_seconds": (
+                round(now - started, 1) if (_job["running"] and started) else None
+            ),
+            "result": _job["result"] if _job["result_at"] > since else None,
+            "error": _job["error"] if _job["error_at"] > since else None,
+        }
 
 
 @app.get("/api/health")

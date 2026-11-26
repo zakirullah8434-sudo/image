@@ -56,6 +56,13 @@ Open **http://127.0.0.1:8000**
    previous seed to reproduce an image exactly.
 7. Press **Generate Image** (or `Ctrl + Enter`).
 
+**Editing an existing image (img2img):** click **Attach an image to edit** under the
+prompt (or **Edit this image** on any result / gallery image) and pick a PNG, JPG or WebP.
+The image appears as a thumbnail with an **Edit strength** slider — `0.10` keeps almost
+everything, `0.95` almost reinvents the picture — and Generate starts from your image
+instead of noise. The upload is downscaled to ≤1024 px inside the browser, sent only to
+your own backend, and never stored anywhere.
+
 While it runs you get a **live elapsed timer** and a phase label. Measured on a 4-core
 i5-3470 with ~1.5 GB RAM free (page file on an SSD):
 
@@ -79,6 +86,7 @@ When it finishes you get:
 - **Download PNG** — one click, saves to your Downloads folder
 - **Copy Seed** — paste it back into the seed box to recreate the image
 - a metadata strip: time, seed, size, steps/CFG, peak RAM, model
+- **Edit this image** — attach the result again for another round of edits
 - the image **auto-saved** into `outputs/` with a timestamp, and added to the
   **History gallery** — click any thumbnail to bring it back into the viewer
 
@@ -91,8 +99,10 @@ under a **5.5 GB peak** for the process, but your PC also runs Windows and every
 
 * **Under ~3.5 GB free** → generation still runs, but a toast warns you that closing apps will
   make it noticeably faster.
-* **Under ~1.0 GB free** → the request is refused with HTTP `503` and a clear message instead
-  of freezing/crashing your machine.
+* **Under ~0.4 GB free** → the request is refused with HTTP `503` and a clear message instead
+  of freezing/crashing your machine. This machine normally idles around **1 GB free** and lets
+  Windows page cold model weights to disk, so the floor is deliberately low — it only trips
+  when there is essentially no commit headroom left at all.
 * Only **one generation runs at a time** (a second request gets `409`), so peak memory can
   never double.
 * Resolution is clamped server-side to **768 px max** regardless of what the client sends.
@@ -102,7 +112,7 @@ under a **5.5 GB peak** for the process, but your PC also runs Windows and every
 Tune the thresholds with environment variables if you like:
 
 ```bat
-set MIN_FREE_RAM_GB=1.0
+set MIN_FREE_RAM_GB=0.4
 set RAM_WARN_GB=3.5
 set TORCH_NUM_THREADS=6
 ```
@@ -151,7 +161,8 @@ If you already have a valid checkpoint in `models/`, setup **skips** the 2 GB do
 |--------|-------|---------|
 | `GET` | `/` | serves `frontend/index.html` |
 | `GET` | `/api/models` | every `.safetensors` in `models/` (name, size, validity) |
-| `POST` | `/api/generate` | run one generation → base64 PNG JSON |
+| `POST` | `/api/generate` | run one generation → base64 PNG JSON (txt2img, or img2img when `image_b64` is set) |
+| `GET` | `/api/job?since=<epoch>` | current/last job — poll this if your generate POST was cut mid-run |
 | `GET` | `/api/gallery` | newest-first list of images in `outputs/` |
 | `GET` | `/api/health` | liveness, free RAM, loaded model |
 | `GET` | `/outputs/{name}.png` | serves a saved image |
@@ -165,12 +176,17 @@ If you already have a valid checkpoint in `models/`, setup **skips** the 2 GB do
   "width": 512, "height": 768,
   "steps": 12, "guidance_scale": 7.0,
   "seed": -1,
-  "model_name": "Realistic_Vision_V6.0_NV_B1_fp16.safetensors"
+  "model_name": "Realistic_Vision_V6.0_NV_B1_fp16.safetensors",
+  "image_b64": "data:image/jpeg;base64,...",
+  "strength": 0.55
 }
 ```
 
-Response includes `image_base64`, `seed`, `generation_time_seconds`, `model_load_seconds`,
-`peak_ram_gb`, `ram_warning`, `filename`, plus the clamped `width`/`height`/`steps`.
+`image_b64` + `strength` are optional — with them the run becomes an **img2img edit**
+(the image is the starting point, `strength` 0.05–0.95 = how far the prompt may change
+it). Response includes `image_base64`, `seed`, `generation_time_seconds`, `model_load_seconds`,
+`peak_ram_gb`, `ram_warning`, `filename`, `mode` (`txt2img`/`img2img`) + `strength`, plus the
+clamped `width`/`height`/`steps`.
 
 Interactive docs are at **http://127.0.0.1:8000/docs**.
 
@@ -280,7 +296,9 @@ between your device and your own machine.
 | Symptom | Fix |
 |---|---|
 | *"No model found in models/"* | run `python backend/setup_model.py`, or drop a `.safetensors` into `models/` |
-| *"Only X GB of RAM is free…" (503)* | close other apps; the guard prevents a crash |
+| *"Only X GB of RAM is free…" (503)* | close other apps; the guard only trips below **0.4 GB** free (this PC normally idles at ~1 GB and pages normally) |
+| *Phone: "Connection dropped — your PC keeps generating…"* | normal — Cloudflare cuts long requests at ~100 s, so the page polls `/api/job` and shows the image when it finishes |
+| *Phone: "Cannot reach the backend…"* | run `tunnel.bat` on the PC and keep it open; the page re-probes by itself every ~15 s |
 | Very slow generation | close apps, use 512×512 and 12–16 steps; set `CFG 1.0`; set `TORCH_NUM_THREADS` to your physical core count |
 | Port already in use | `set PORT=8001` before `start.bat`, or stop the other process |
 | Download interrupted | `python backend/setup_model.py` resumes/ retries automatically |
