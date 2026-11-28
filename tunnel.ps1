@@ -15,6 +15,10 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $root) { $root = (Get-Location).Path }
 Set-Location $root
 
+# autorun.bat sets LIS_AUTORUN=1: the window is hidden then, so nobody can
+# press Enter - skip every Read-Host and just exit with the right code.
+$script:AutoStart = ($env:LIS_AUTORUN -eq "1")
+
 $HostAddr = "127.0.0.1"
 $Port     = 8000
 $Bin      = Join-Path $root "tools\cloudflared.exe"
@@ -32,7 +36,7 @@ if (-not $listening) {
     Write-Host " [!] Nothing is listening on port $Port."
     Write-Host "     Run start.bat FIRST, keep it open, then run this file."
     Write-Host ""
-    Read-Host "Press Enter to close"
+    if (-not $script:AutoStart) { Read-Host "Press Enter to close" }
     exit 1
 }
 
@@ -52,7 +56,7 @@ if (Test-Path $Bin) {
         Write-Host "         https://github.com/cloudflare/cloudflared/releases"
         Write-Host "         and save it as:  tools\cloudflared.exe"
         Write-Host ""
-        Read-Host "Press Enter to close"
+        if (-not $script:AutoStart) { Read-Host "Press Enter to close" }
         exit 1
     }
 }
@@ -120,4 +124,4 @@ $script:published = $false
 
 Write-Host ""
 Write-Host " Tunnel closed."
-Read-Host "Press Enter to close"
+if (-not $script:AutoStart) { Read-Host "Press Enter to close" }

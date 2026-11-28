@@ -48,7 +48,7 @@ Open **http://127.0.0.1:8000** (or the hosted Vercel URL).
 
 | Mode | What it does |
 |------|--------------|
-| 🌐 **Online — hosted** | Images are created by a hosted AI service called directly from your browser. **Your PC does not need to be on**, works on any phone/laptop, no setup. Your prompt is sent to that third party. |
+| 🌐 **Online — hosted** | Images are created by a hosted AI service called directly from your browser. **Your PC does not need to be on**, works on any phone/laptop, no setup, **and you can upload a photo to edit it (img2img)**. Results look photorealistic by default (style words like *anime/cartoon* switch that off). Your prompt is sent to that third party. |
 | 🖥️ **Local — on this PC** | Stable Diffusion runs on your own computer — 100% private, offline, supports image editing (img2img) and your own model files. Needs `start.bat` (and `tunnel.bat` for phones). |
 
 The steps below describe **Local mode**:
@@ -220,6 +220,11 @@ local-image-studio/
 ├── venv/                   # virtual environment (auto-created)
 ├── start.bat               # Windows one-click launch
 ├── start.sh                # Linux / macOS launch
+├── autorun.bat             # auto-start watchdog: backend + tunnel, restarts every 30 s
+├── autorun.vbs             #   └─ hidden launcher (no window at sign-in)
+├── install-autostart.bat   # one-time setup: puts autorun into Windows Startup
+├── install-autostart.ps1   #   └─ creates the Startup shortcut
+├── stop.bat / stop.ps1     # stops backend + tunnel + watchdog
 ├── tunnel.bat              # public https:// tunnel for the backend (Vercel/phone use)
 ├── tunnel.ps1              #   └─ publishes the tunnel address to the site by itself
 ├── vercel.json             # static-host config: serves frontend/ only
@@ -302,20 +307,59 @@ between your device and your own machine.
 
 ---
 
-## 8. Troubleshooting
+## 8. Run it automatically with Windows (recommended)
+
+After **one** double-click, the backend and the public tunnel start with Windows, restart
+themselves if they ever die, and the hosted page connects by itself — on PC and phone.
+
+### One-time setup
+
+1. Double-click **`install-autostart.bat`**.
+2. Done — it creates a hidden shortcut in your Startup folder and starts the watchdog
+   right away (no sign-out needed).
+
+What runs from now on, **every time you sign in to Windows**:
+
+| Piece | What it does |
+|---|---|
+| `autorun.vbs` (hidden) | starts `autorun.bat` with **no window** |
+| `autorun.bat` (watchdog) | ① starts the backend if port 8000 is dead → ② waits for `/api/health` (~60 s while the model server warms up) → ③ starts the tunnel if cloudflared isn't running → ④ **re-checks every 30 s and restarts whatever died** |
+| `tunnel.ps1` (auto mode) | publishes the new `https://….trycloudflare.com` address to the site by itself (same as always), without waiting for a key press |
+
+Logs go to `%TEMP%\lis-autorun.log`. **Stop everything** with **`stop.bat`**
+(the watchdog returns at the next sign-in). **Start manually again** with `start.bat`
+and/or `tunnel.bat` whenever you like — they coexist with the watchdog.
+
+> The **first** start after boot takes about a minute (PyTorch loads the model); the
+> status pill on the hosted page turns green by itself. If the PC sleeps, the tunnel
+> drops — keep the PC awake (Settings → Power) or just wake it; the page reconnects
+> automatically.
+
+### Manual step-by-step (no auto-start)
+
+1. Double-click **`start.bat`** → backend runs on `http://127.0.0.1:8000` (leave the window open).
+2. Double-click **`tunnel.bat`** in a second window → public address is published to the
+   site automatically (leave that window open too).
+3. Open **https://skyhoniximage.vercel.app** on PC or phone → the status pill turns
+   *Server online* by itself within about a minute. Nothing to paste.
+4. To stop: close both windows (or run `stop.bat`).
+
+---
+
+## 9. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | *"No model found in models/"* | run `python backend/setup_model.py`, or drop a `.safetensors` into `models/` |
 | *"Only X GB of RAM is free…" (503)* | close other apps; the guard only trips below **0.4 GB** free (this PC normally idles at ~1 GB and pages normally) |
 | *Phone: "Connection dropped — your PC keeps generating…"* | normal — Cloudflare cuts long requests at ~100 s, so the page polls `/api/job` and shows the image when it finishes |
-| *Phone: "Cannot reach the backend…"* | run `tunnel.bat` on the PC and keep it open; the page re-probes by itself every ~15 s |
+| *Phone: "Cannot reach the PC/backend…"* | the PC is off or asleep, or the tunnel died — run `install-autostart.bat` **once** so both start with Windows; otherwise run `start.bat` + `tunnel.bat` and keep them open. The page re-probes by itself every ~15 s |
 | Very slow generation | close apps, use 512×512 and 12–16 steps; set `CFG 1.0`; set `TORCH_NUM_THREADS` to your physical core count |
 | Port already in use | `set PORT=8001` before `start.bat`, or stop the other process |
 | Download interrupted | `python backend/setup_model.py` resumes/ retries automatically |
 | Want to re-download the model | delete the file in `models\` then run `setup_model.py --force` |
 | Need more page file | System → Advanced → Performance → Virtual memory (the app never relies on it, but it helps on 8 GB) |
-| Hosted page says **Offline** / modal about a backend | run `start.bat` + `tunnel.bat` on the PC and leave both open — the page connects **by itself** within a minute (it re-checks every few seconds). The modal only appears while no tunnel is running |
+| Hosted page says **Offline** / modal about a backend | your PC is off or only `start.bat`/`tunnel.bat` are missing — run `install-autostart.bat` once and it never happens again; otherwise open `start.bat` + `tunnel.bat` and leave both open. The page connects **by itself** within a minute (it re-checks every few seconds) |
 | *"did not answer with JSON"* / tunnel errors | `tunnel.bat` window was closed or the PC slept — rerun it; the page picks up the **new** address automatically, nothing to paste |
 | `409 Conflict` on Generate | another image is really still generating — the page now detects that and waits for it automatically; if nothing is running, just press Generate again |
 | Images 404 on the hosted page | the saved tunnel address is stale — rerun `tunnel.bat`; the page refreshes its address automatically (or override it with the **local** button) |

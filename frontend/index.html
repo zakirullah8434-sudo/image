@@ -218,7 +218,7 @@
         <button id="clearNegative" class="text-[11px] text-slate-600 transition hover:text-slate-400">clear</button>
       </div>
       <textarea id="negative" rows="3" maxlength="4000"
-        class="w-full rounded-xl border border-white/10 bg-ink-850 px-3.5 py-3 text-sm leading-relaxed text-slate-300 placeholder:text-slate-600 outline-none transition focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20">low quality, worst quality, blurry, jpeg artifacts, watermark, text, logo, signature, deformed, bad anatomy, malformed hands, extra fingers, mutated hands, cross-eyed, poorly drawn face</textarea>
+        class="w-full rounded-xl border border-white/10 bg-ink-850 px-3.5 py-3 text-sm leading-relaxed text-slate-300 placeholder:text-slate-600 outline-none transition focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20">low quality, worst quality, blurry, jpeg artifacts, watermark, text, logo, signature, deformed, bad anatomy, malformed hands, extra fingers, mutated hands, cross-eyed, poorly drawn face, cartoon, anime, illustration, painting, drawing, sketch, comic, 3d render, cgi, cel shading, plastic skin, doll-like</textarea>
     </div>
 
     <div class="h-px bg-white/5"></div>
@@ -429,7 +429,7 @@
         <p class="mt-1.5 text-[12.5px] leading-relaxed text-slate-400">
           Images are created by a <b class="text-slate-300">hosted AI service</b> straight from this page.
           <b class="text-slate-300">Your PC does not need to be on</b> — works on any phone or laptop,
-          with fewer prompt restrictions.
+          with fewer prompt restrictions. You can also <b class="text-slate-300">upload a photo and edit it</b>.
         </p>
         <span class="mt-3 inline-block rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300">⚡ Works anywhere · PC off</span>
       </button>
@@ -478,9 +478,9 @@ const LS_MODE = "lis_mode";
 let appMode = "local";
 let modeWaiters = [];
 
-/* Controls that only make sense for the local (PC) pipeline. */
-const LOCAL_ONLY_IDS = ["modelSec", "negativeSec", "stepsSec", "cfgSec",
-                        "attachBtn", "fileInput", "ramPill"];
+/* Controls that only make sense for the local (PC) pipeline.
+ * (attachBtn/fileInput are NOT here: online mode edits images too.) */
+const LOCAL_ONLY_IDS = ["modelSec", "negativeSec", "stepsSec", "cfgSec", "ramPill"];
 
 function showModeChooser() { $("modeOverlay").classList.remove("hidden"); }
 function hideModeChooser() { $("modeOverlay").classList.add("hidden"); }
@@ -517,10 +517,12 @@ async function activateMode(m) {
   });
 
   if (online) {
-    clearAttachment();                    // img2img is a local-only feature
     closeBackendModal();
-    if (!$("resultState").classList.contains("hidden")) {
-      $("editResultBtn").classList.add("hidden");   // hosted mode has no edit
+    renderAttachment();                   // online mode edits images too
+    if (currentUrl) {                     // a result is on screen -> enable edit
+      $("editResultBtn").disabled = false;
+      $("editResultBtn").classList.remove("hidden");
+      $("editResultBtn").classList.add("flex");
     }
     $("backendLabel").textContent = "online";
   } else {
@@ -610,9 +612,9 @@ async function prepareAttachment(file) {
 }
 
 function renderAttachment() {
-  const on = !!attachedImage && appMode !== "online";   // editing is local-only
+  const on = !!attachedImage;                        // works in both modes
   $("attachWrap").classList.toggle("hidden", !on);
-  $("attachBtn").classList.toggle("hidden", on || appMode === "online");
+  $("attachBtn").classList.toggle("hidden", on);
   if (on) {
     $("attachThumb").src = attachedImage.dataUrl;
     $("attachName").textContent = attachedImage.name;
@@ -624,10 +626,6 @@ function renderAttachment() {
 
 async function attachFromFile(file) {
   if (!file) return;
-  if (appMode === "online") {
-    toast("Image editing (img2img) runs in Local mode — switch with the pill in the top bar.", "warn");
-    return;
-  }
   if (file.type && !/^image\/(png|jpe?g|webp|gif|bmp|avif)$/i.test(file.type)) {
     toast("Use a PNG, JPG or WebP image.", "warn");
     return;
@@ -1199,36 +1197,87 @@ function sniffImageMime(buf) {
 }
 
 async function fetchOnlineBlob(url, signal) {
+  /* SPEED FIX: race every route INSTEAD of waiting for each one to die.
+   * Direct edge starts immediately (50 s cap); CORS mirrors join in
+   * parallel after 8 s; first image bytes win. Whole race settles in
+   * <= ~58 s instead of the old sequential stack that passed 2 minutes. */
   const routes = [
-    url,
-    "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
-    "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(url),
+    { u: url, timeout: 50000 },
+    { u: "https://api.allorigins.win/raw?url=" + encodeURIComponent(url), timeout: 50000, delay: 8000 },
+    { u: "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(url), timeout: 50000, delay: 8000 },
   ];
-  let lastErr = null;
-  for (const route of routes) {
+  const errors = [];
+  let pending = routes.length;
+
+  const runRoute = async (route) => {
+    if (route.delay) await sleep(route.delay);
+    const ctrl = new AbortController();
+    const onAbort = () => ctrl.abort();
+    if (signal) signal.addEventListener("abort", onAbort);
+    const cap = setTimeout(() => ctrl.abort(), route.timeout);
     try {
-      const res = await fetch(route, { signal, cache: "no-store" });
-      if (!res.ok) { lastErr = new Error("HTTP " + res.status); continue; }
+      const res = await fetch(route.u, { signal: ctrl.signal, cache: "no-store" });
+      if (!res.ok) {
+        const ra = res.headers.get("retry-after");
+        throw new Error("HTTP " + res.status + (ra ? "/" + ra : ""));
+      }
       const blob = await res.blob();
       const ct = (blob.type || res.headers.get("content-type") || "").toLowerCase();
       if (ct.indexOf("image/") === 0) return blob;
       // some mirrors mislabel the content type - sniff the actual bytes
       const sniff = sniffImageMime(await blob.slice(0, 16).arrayBuffer());
       if (sniff) return new Blob([await blob.arrayBuffer()], { type: sniff });
-      lastErr = new Error("not an image (" + (ct || "empty") + ")");
-    } catch (e) {
-      if (e && e.name === "AbortError") throw e;
-      lastErr = e;
+      throw new Error("not an image (" + (ct || "empty") + ")");
+    } finally {
+      clearTimeout(cap);
+      if (signal) signal.removeEventListener("abort", onAbort);
     }
+  };
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+    routes.forEach((route) => {
+      runRoute(route).then(
+        (blob) => done(resolve, blob),
+        (e) => {
+          if (signal && signal.aborted) { done(reject, e); return; }
+          errors.push(e);
+          if (--pending === 0) done(reject, onlineFetchError(errors));
+        }
+      );
+    });
+    if (signal) {
+      signal.addEventListener("abort", () =>
+        done(reject, Object.assign(new Error("aborted"), { name: "AbortError" })));
+    }
+  });
+}
+
+function onlineFetchError(errors) {
+  const msgs = errors.map((e) => (e && e.message) || "");
+  const hit = msgs.find((m) => /^HTTP \d+/.test(m)) || "";
+  const status = parseInt(((hit.match(/^HTTP (\d+)/) || [])[1]) || "0", 10);
+  const retry = (hit.match(/^HTTP \d+\/(\d+)/) || [])[1];
+  if (status === 402 || status === 401) {
+    // Pollinations' anonymous tier = one image at a time, ~45 s apart.
+    return new Error("The free hosted tier allows one image at a time" +
+      (retry && /^\d+$/.test(retry)
+        ? " and asks for a ~" + retry + " s pause — wait that long"
+        : " — wait about 45 seconds") +
+      ", then try again.");
   }
-  const msg = (lastErr && lastErr.message) || "";
-  if (/^HTTP (401|402|403|429)$/.test(msg)) {
-    throw new Error(msg === "HTTP 429"
-      ? "The hosted service is rate-limiting right now — wait ~30 s and try again."
-      : "The hosted service is refusing requests (" + msg +
-        ") — it may be temporarily down. Try again in a minute, or switch to Local mode.");
+  if (status === 403) {
+    return new Error("The hosted service is refusing requests right now — try again in a minute, or switch to Local mode.");
   }
-  throw lastErr || new Error("Could not reach the hosted service. Check your connection and try again.");
+  if (status === 429) {
+    return new Error("The hosted service is rate-limiting right now — wait ~30 s and try again.");
+  }
+  const other = msgs.filter(Boolean).pop();
+  if (other && !/^HTTP \d+$/.test(other) && other.indexOf("not an image") !== 0) {
+    return new Error(other + " — check your connection and try again.");
+  }
+  return new Error("Could not reach the hosted service. Check your connection and try again.");
 }
 
 function loadOnlineImageEl(url) {
@@ -1241,24 +1290,147 @@ function loadOnlineImageEl(url) {
   });
 }
 
+/* ── photorealism guard ───────────────────────────────────────────────
+ * Hosted models drift toward "cartoon / illustration" for plain prompts.
+ * Unless the user explicitly asks for an illustrated style, append
+ * subject-aware photo tokens so results read as real humans/photos. */
+const PHOTO_SUFFIX =
+  "photorealistic, RAW photo, DSLR, 85mm lens, natural skin texture, detailed eyes, 8k uhd, sharp focus";
+const PHOTO_PERSON_SUFFIX =
+  "real human, lifelike skin, natural proportions, authentic candid photo";
+const ANIME_RE = /\b(anime|manga|cartoon|cartoony|pixar|disney|cel[- ]?shaded|ghibli|comic|illustration|drawing|sketch|painting|watercolo?r|3d render|cgi|voxel|pixel art|chibi)\b/i;
+const PERSON_RE = /\b(man|woman|boy|girl|person|people|human|face|portrait|lady|guy|female|male|child|kid|couple|selfie|someone|somebody)\b/i;
+
+function boostOnlinePrompt(prompt) {
+  if (ANIME_RE.test(prompt)) return prompt;   // user asked for an illustrated look
+  let out = prompt;
+  if (PERSON_RE.test(prompt)) out += ", " + PHOTO_PERSON_SUFFIX;
+  return out + ", " + PHOTO_SUFFIX;
+}
+
+/* Re-encode to JPEG so results stay small enough for the localStorage
+ * gallery (PNG screenshots from the editor can be several MB). */
+async function blobToJpeg(blob, quality) {
+  try {
+    const bmp = await createImageBitmap(blob);
+    const cv = document.createElement("canvas");
+    cv.width = bmp.width; cv.height = bmp.height;
+    const g = cv.getContext("2d");
+    g.fillStyle = "#ffffff";
+    g.fillRect(0, 0, cv.width, cv.height);
+    g.drawImage(bmp, 0, 0);
+    const nb = await new Promise((r) => cv.toBlob(r, "image/jpeg", quality || 0.92));
+    if (nb) return nb;
+  } catch (e) { /* keep the original bytes */ }
+  return blob;
+}
+
+/* ── online image editing (img2img) ───────────────────────────────────
+ * Pollinations gated their img2img behind a paid API key, so edits run
+ * on a free keyless HuggingFace Space instead (CORS open, browser-callable):
+ *   1) POST /upload            (multipart "files" -> server path)
+ *   2) POST /call/process_images (data[] -> event_id)
+ *   3) GET  /call/process_images/<id>  (SSE stream closes with the result)
+ *   4) GET  /file=<path>       (the produced image)
+ * Typical round trip: 8-40 s. */
+const ONLINE_IMG2IMG = "https://gemini899-img2img.hf.space";
+
+async function editOnlineImage(prompt, strength, seed, signal) {
+  const call = async (path, opts) => {
+    const res = await fetch(ONLINE_IMG2IMG + path, Object.assign({ signal: signal }, opts || {}));
+    if (!res.ok) throw new Error("hosted editor HTTP " + res.status);
+    return res;
+  };
+
+  // 1) upload the attached image (already downscaled to <=1024 px JPEG)
+  const src = await fetch(attachedImage.dataUrl);
+  const inBlob = await src.blob();
+  const fd = new FormData();
+  fd.append("files", inBlob, "edit-input.png");
+  const up = await call("/upload", { method: "POST", body: fd });
+  const paths = await up.json();
+  const p0 = paths && paths[0];
+  if (!p0) throw new Error("the hosted editor rejected the upload");
+  const fileData = typeof p0 === "string"
+    ? { path: p0, meta: { _type: "gradio.FileData" } }
+    : p0;
+
+  // 2) queue the edit job (FLUX.1-schnell = 4-step turbo model; the space
+  //    also caps strength at 0.75 server-side, so clamp before sending)
+  $("loadingNote").textContent = "Editing on the hosted engine — usually 10–40 s…";
+  const effStrength = Math.min(0.75, Math.max(0.05, strength));
+  const job = await call("/call/process_images", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: [fileData, prompt, effStrength, Math.floor(seed), 4] }),
+  });
+  const started = await job.json();
+  if (!started || !started.event_id) throw new Error("the hosted editor did not accept the job");
+
+  // 3) the SSE stream closes when the job finishes; scan for the file path
+  const poll = await call("/call/process_images/" + started.event_id);
+  const text = await poll.text();
+  let outPath = null;
+  let errMsg = null;
+  let eventName = "";
+  for (const line of text.split("\n")) {
+    if (line.indexOf("event:") === 0) { eventName = line.slice(6).trim(); continue; }
+    if (line.indexOf("data:") !== 0) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    if (eventName === "error") { errMsg = payload.slice(0, 200); continue; }
+    try {
+      const arr = JSON.parse(payload);
+      if (arr && arr[0] && arr[0].path) outPath = arr[0].path;
+    } catch (e) { /* keep scanning */ }
+  }
+  if (!outPath) {
+    throw new Error(errMsg
+      ? "the hosted editor reported: " + errMsg
+      : "the hosted editor finished without an image (it may be busy — try again)");
+  }
+
+  // 4) download the result and normalize it to JPEG
+  $("loadingNote").textContent = "Fetching the edited image…";
+  const out = await call("/file=" + outPath, { cache: "no-store" });
+  const blob = await out.blob();
+  const ct = (blob.type || "").toLowerCase();
+  if (ct.indexOf("image/") !== 0) {
+    const sniff = sniffImageMime(await blob.slice(0, 16).arrayBuffer());
+    if (!sniff) throw new Error("the hosted editor returned a non-image");
+    return blobToJpeg(new Blob([await blob.arrayBuffer()], { type: sniff }), 0.92);
+  }
+  return blobToJpeg(blob, 0.92);
+}
+
 async function generateOnline(prompt) {
   const { w, h } = currentRatio();
   let seed = parseInt($("seed").value, 10);
   if (!Number.isFinite(seed) || seed < 0) seed = Math.floor(Math.random() * 4294967295);
 
-  // Hosted endpoints work best with reasonably short prompts.
-  const shortPrompt = prompt.length > 1500 ? prompt.slice(0, 1500) : prompt;
-  const url = ONLINE_ENDPOINT + encodeURIComponent(shortPrompt)
-    + "?width=" + w + "&height=" + h + "&seed=" + seed
-    + "&model=flux&nologo=true&referrer=local-image-studio";
+  const editing = !!attachedImage;
+  const strength = editing ? parseFloat($("strength").value) : null;
+  const fullPrompt = boostOnlinePrompt(prompt);
 
   setBusy(true);
   recoveryMode = false;
   $("emptyState").classList.add("hidden");
   $("resultState").classList.add("hidden");
   $("loadingState").classList.remove("hidden");
-  $("loadingNote").textContent = "Online mode · hosted Flux (no PC needed)";
+  $("loadingNote").textContent = editing
+    ? "Online edit · sending your image to the hosted editor…"
+    : "Online mode · hosted Flux (no PC needed)";
   startTimer();
+
+  // Keep the user informed on slow requests (never let it feel dead).
+  const noteT1 = setTimeout(() => {
+    $("loadingNote").textContent = editing
+      ? "Editing on the hosted engine — usually 10–40 s…"
+      : "Still working — hosted services sometimes take up to a minute…";
+  }, 12000);
+  const noteT2 = setTimeout(() => {
+    $("loadingNote").textContent = "Trying backup routes — almost there…";
+  }, 40000);
 
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 180000);
@@ -1266,22 +1438,74 @@ async function generateOnline(prompt) {
     const t0 = Date.now();
     let blob = null;
     let remoteUrl = null;
-    try {
-      blob = await fetchOnlineBlob(url, ctrl.signal);
-    } catch (e) {
-      if (e && e.name === "AbortError") throw e;
-      // Last resort: plain <img> load (no Origin header -> no header gating).
-      // The bytes stay unreadable, but the picture still shows and the URL is
-      // stored for the gallery/download.
-      const shown = await loadOnlineImageEl(url);
-      if (!shown) throw e;
-      remoteUrl = shown;
+
+    if (editing) {
+      blob = await editOnlineImage(fullPrompt, strength, seed, ctrl.signal);
+    } else {
+      // Hosted endpoints work best with reasonably short prompts.
+      const shortPrompt = fullPrompt.length > 1500 ? fullPrompt.slice(0, 1500) : fullPrompt;
+      const url = ONLINE_ENDPOINT + encodeURIComponent(shortPrompt)
+        + "?width=" + w + "&height=" + h + "&seed=" + seed
+        + "&model=flux&nologo=true&referrer=local-image-studio";
+
+      // Race bytes against a plain <img> load IN PARALLEL. The <img> needs
+      // no Origin header, so it works even when the edge blocks CORS fetches;
+      // it starts after 12 s (or immediately if the byte routes already
+      // failed) and whichever finishes first wins - a blob gets 3 s grace so
+      // we still prefer real bytes for the gallery. Everything is bounded:
+      // the whole step settles in about a minute, never 2+.
+      const st = { blob: null, blobErr: null, blobDone: false, img: null, imgDone: false, graceOver: false, graceTimer: null, settled: false };
+      let finish = null;
+      const doneP = new Promise((res) => { finish = res; });
+      const settle = () => {
+        if (st.settled) return;
+        if (st.blob) { st.settled = true; finish({ blob: st.blob }); return; }
+        if (st.blobDone) {                       // byte routes finished (error)
+          if (st.imgDone) { st.settled = true; finish(st.img ? { img: st.img } : { err: st.blobErr }); }
+          return;                                // ...otherwise keep waiting for <img>
+        }
+        if (st.imgDone && st.img && !st.blobDone) {
+          if (!st.graceTimer) {
+            st.graceTimer = setTimeout(() => { st.graceOver = true; settle(); }, 3000);
+          }
+          if (st.graceOver) { st.settled = true; finish({ img: st.img }); }
+          return;
+        }
+        // img failed while bytes are still pending -> keep waiting for bytes
+      };
+      let imgStarted = false;
+      const startImg = async () => {
+        if (imgStarted || st.settled) return;
+        imgStarted = true;
+        const u = await loadOnlineImageEl(url);
+        st.img = u; st.imgDone = true; settle();
+      };
+      setTimeout(startImg, 12000);               // backup if bytes are slow
+      fetchOnlineBlob(url, ctrl.signal).then(
+        (b) => { st.blob = b; st.blobDone = true; settle(); },
+        (e) => {
+          if (e && e.name === "AbortError") { st.settled = true; finish({ err: e }); return; }
+          st.blobErr = e; st.blobDone = true; settle(); startImg();   // bytes failed -> <img> right away
+        }
+      );
+      const got = await doneP;
+      if (got.blob) blob = got.blob;
+      else if (got.img) remoteUrl = got.img;     // display-only result
+      else throw got.err || new Error("Could not reach the hosted service. Try again.");
     }
+
     let dataUrl = null;
     let mime = "image/jpeg";
     if (blob) {
       dataUrl = await readFileAsDataURL(blob);
       mime = blob.type || "image/jpeg";
+    }
+    let outW = w, outH = h;
+    if (editing && blob) {
+      try {
+        const bmp = await createImageBitmap(blob);
+        outW = bmp.width; outH = bmp.height;
+      } catch (e) { /* keep ratio dims */ }
     }
     const elapsed = Math.round(((Date.now() - t0) / 1000) * 10) / 10;
     const finalUrl = dataUrl || remoteUrl;
@@ -1290,16 +1514,18 @@ async function generateOnline(prompt) {
     const data = {
       image_base64: dataUrl ? dataUrl.split(",")[1] : null,
       mime: mime,
-      filename: "online_" + stamp + "_seed" + seed + "." + ext,
+      filename: (editing ? "online_edit_" : "online_") + stamp + "_seed" + seed + "." + ext,
       url: finalUrl,
       seed: seed,
-      width: w,
-      height: h,
-      steps: "n/a",
-      guidance_scale: "hosted",
+      width: outW,
+      height: outH,
+      steps: editing ? 4 : "n/a",
+      guidance_scale: editing ? "hosted img2img (FLUX schnell)" : "hosted",
       mode: "online",
-      strength: null,
-      model_name: "Flux · pollinations.ai (hosted)",
+      strength: strength,
+      model_name: editing
+        ? "img2img · hosted HF Space (no PC)"
+        : "Flux · pollinations.ai (hosted)",
       generation_time_seconds: elapsed,
       model_load_seconds: 0,
       total_time_seconds: elapsed,
@@ -1312,6 +1538,11 @@ async function generateOnline(prompt) {
     saveOnlineImage({ name: data.filename, url: finalUrl, created: new Date().toISOString() });
     loadGallery();
     pingHealth();
+    if (editing) {
+      // Detach so the next Generate starts fresh instead of re-editing.
+      clearAttachment();
+      toast("Edit finished in " + elapsed + " s.", "success");
+    }
   } catch (e) {
     stopTimer();
     failUI();
@@ -1320,6 +1551,8 @@ async function generateOnline(prompt) {
       : (e.message || "Online generation failed. Try again."), "error");
   } finally {
     clearTimeout(timeout);
+    clearTimeout(noteT1);
+    clearTimeout(noteT2);
     setBusy(false);
     recoveryMode = false;
   }
@@ -1416,10 +1649,16 @@ async function generate() {
       }
       const msg = outcome && outcome.error ? outcome.error.message
         : outcome && outcome.lost && outcome.reason === "unreachable"
-          ? "Cannot reach your PC right now — check that tunnel.bat is still running on your PC, then try again."
+          ? (isLocalHost()
+              ? "Cannot reach the backend on this PC — run start.bat again, then try once more."
+              : "Cannot reach your PC right now — turn your PC on (auto-start brings the tunnel up) and try again.")
           : outcome && outcome.lost
-            ? "The request never reached your PC. Check that tunnel.bat is running on your PC, then try again."
-            : "Gave up after 30 minutes without a result. Check tunnel.bat — the image may still be in the gallery.";
+            ? (isLocalHost()
+                ? "The request never reached the backend — run start.bat again, then retry."
+                : "The request never reached your PC. Check that tunnel.bat is running on your PC, then try again.")
+            : (isLocalHost()
+                ? "Gave up after 30 minutes without a result — check the start.bat window; the image may still be in the gallery."
+                : "Gave up after 30 minutes without a result. Check tunnel.bat — the image may still be in the gallery.");
       failUI();
       toast(msg, "error");
       loadGallery();
